@@ -7,7 +7,7 @@ import requests
 import talib
 import datetime
 from scipy.signal import savgol_filter
-
+from scipy.stats import linregress
 
 # === 初期設定 ===
 SYMBOL = "USD"
@@ -51,266 +51,199 @@ def fetch_data(SYMBOL, TO_SYMBOL):
     for col in ['open', 'high', 'low', 'close', 'volumeto']:
         df[col] = df[col].astype(float)
     return df
+
+# === g_trendlines 関連 ===
+class FXBase():
+    candles = None
+    def __init__(self):
+        cols = ['col1', 'col2']
+        FXBase.candles = pd.DataFrame(index=[], columns=cols)
+
+def get_highpoint(start, end):
+    chart = FXBase.candles[start:end+1]
+    while len(chart)>3:
+        regression = linregress(x=chart['time_id'], y=chart['high'])
+        chart = chart.loc[chart['high'] > regression[0]*chart['time_id'] + regression[1]]
+    return chart
+
+def get_lowpoint(start, end):
+    chart = FXBase.candles[start:end+1]
+    while len(chart)>3:
+        regression = linregress(x=chart['time_id'], y=chart['low'])
+        chart = chart.loc[chart['low'] < regression[0]*chart['time_id'] + regression[1]]
+    return chart
+
+def g_trendlines(span=30, min_interval=3):
+    trendlines = []
+    for i in FXBase.candles.index[::int(span/2)]:
+        highpoint = get_highpoint(i, i + span)
+        if len(highpoint) >= 2 and abs(highpoint.index[0] - highpoint.index[1]) >= min_interval:
+            reg = linregress(x=highpoint['time_id'], y=highpoint['high'])
+            if reg[0] < 0.0:
+                line = reg[0] * FXBase.candles['time_id'][i:i+span*2] + reg[1]
+                trendlines.append(line)
+        lowpoint = get_lowpoint(i, i + span)
+        if len(lowpoint) >= 2 and abs(lowpoint.index[0] - lowpoint.index[1]) >= min_interval:
+            reg = linregress(x=lowpoint['time_id'], y=lowpoint['low'])
+            if reg[0] > 0.0:
+                line = reg[0] * FXBase.candles['time_id'][i:i+span*2] + reg[1]
+                trendlines.append(line)
+    return trendlines
+
+# === 傾き計算 ===
 def calc_slope(line, window=5):
-    """
-    line: 高値ラインや安値ラインのリスト
-    window: 傾きを計算する期間
-    return: 傾き（1本あたりの増減量）
-    """
     if len(line) < window:
         return 0
     y = np.array(line[-window:])
     x = np.arange(window)
-    # 最小二乗法で傾き計算
-    slope = np.polyfit(x, y, 1)[0]
-    return slope
-# === 動的計画法で近似ライン（単純分割＋ノイズ除去） ===
-def dp_fit_lines(series, window=40, margin=0.0):
-    highs = []
-    lows = []
-    for start in range(0, len(series), window):
-        high = max(series[start:start+window]) * (1 + margin)
-        low = min(series[start:start+window]) * (1 - margin)
-        highs.extend([high] * window)
-        lows.extend([low] * window)
-    highs = highs[:len(series)]
-    lows = lows[:len(series)]
-    return highs, lows
+    return np.polyfit(x, y, 1)[0]
 
-# === シグナル生成（ADX条件付き） ===
-def judge_trade_dp(df, high_lines, low_lines, margin=0.0, adx_period=14, adx_th=20, slope_window=20, slope_th=0.01, atr_th_ratio=0.3):
-    """
-    ATR・ローソク足の方向・スコアによるフィルター付きシグナル判定
-    """
-    signal = []
-    signal_score = []
+# === シグナル判定（g_trendlines 押し目判定付き） ===
+def judge_trade_dp(df, high_lines, low_lines, g_trends, margin=0.0, slope_th=0.01):
+    signals = []
     closes = df['close'].values
-    highs = df['high'].values
-    lows = df['low'].values
-    opens = df['open'].values
-    adx = talib.ADX(highs, lows, closes, timeperiod=adx_period)
-    atr = talib.ATR(highs, lows, closes, timeperiod=14)
-    high_slope = calc_slope(high_lines, window=slope_window)
-    low_slope = calc_slope(low_lines, window=slope_window)
-    print("high_slope:", high_slope, "low_slope:", low_slope)
-    count = 0
-    atr_mean = np.nanmean(atr)
-    for i in range(len(low_lines)):
-        idx = i + (len(df) - len(low_lines))
-        close = closes[idx]
-        open_ = opens[idx - 1] if idx > 0 else closes[idx]
-        high = high_lines[i] * (1 + margin)
-        low = low_lines[i] * (1 - margin)
-        adx_val = adx[idx]
-        atr_val = atr[idx]
-        atr_ok = atr_val >= atr_mean * atr_th_ratio
-
-        # 信頼度スコア（最大3.0）
-        score = 0
-        if adx_val >= adx_th:
-            score += 1
-        if atr_ok:
-            score += 1
-        if abs(high_slope) > slope_th or abs(low_slope) > slope_th:
-            score += 1
-
-        upper_threshold = high - (high - low) * 0.03
-        lower_threshold = low + (high - low) * 0.03
-
-        # 判定
+    for i in range(len(df)):
+        close = closes[i]
         sig = None
-        if adx_val >= adx_th and high_slope > slope_th:
-            sig = "TREND_UP"
-            count += 1
-        elif adx_val >= adx_th and low_slope < -slope_th:
-            sig = "TREND_DOWN"
-            count += 1
-        elif close > upper_threshold and abs(high_slope) < slope_th and abs(low_slope) < slope_th:
-            sig = "REVERSE_DOWN"
-            count += 1
-        elif close < lower_threshold and abs(high_slope) < slope_th and abs(low_slope) < slope_th:
-            sig = "REVERSE_UP"
-            count += 1
-        else:
-            sig = None
-        signal.append(sig)
-        signal_score.append(score if sig else None)
-    print("count : ",count)
-    return [None] * (len(df) - len(signal)) + signal, [None] * (len(df) - len(signal_score)) + signal_score
+        for line in g_trends:
+            if i >= len(line):
+                continue
+            trend_price = line.iloc[i]
+            slope = calc_slope(line.tolist())
+            dist = abs(close - trend_price) / close
+            if slope > slope_th and dist < 0.003:
+                sig = "PULLBACK_BUY"
+                break
+            elif slope < -slope_th and dist < 0.003:
+                sig = "PULLBACK_SELL"
+                break
+        signals.append(sig)
+    return signals
 
-
-def fit_lines_smooth(series, window=41, poly=3, margin=0.0):
-    high_line = savgol_filter(series.rolling(window=window, min_periods=1).max(), window_length=window, polyorder=poly)
-    low_line = savgol_filter(series.rolling(window=window, min_periods=1).min(), window_length=window, polyorder=poly)
-    return (high_line * (1 + margin)).tolist(), (low_line * (1 - margin)).tolist()
-
-# === 勝率計算関数（時間制限型） ===
-def calc_winrate(df, open_, close, high, low, entry_minutes=10, tp_trend_pips=8, sl_trend_pips=4, tp_range_pips=4, sl_range_pips=2, spread=0.02, symbol="USDJPY", lot=1000, start_balance=50000, leverage=3):
-    high_lines, low_lines = fit_lines_smooth(df['high'], window=40)
-    signals,_ = judge_trade_dp(df, high_lines, low_lines)
+# === 簡易勝率評価 ===
+def calc_winrate(df, open_, close, high, low, g_trends, entry_minutes=10, tp_pips=10, sl_pips=4, spread=0.02, symbol="USDJPY", lot=1000, start_balance=50000, leverage=3):
+    signals = judge_trade_dp(df, [], [], g_trends)
     entries, results = [], []
     pips_unit = 0.01 if "JPY" in symbol else 0.0001
-    tp_trend_value = tp_trend_pips * pips_unit
-    sl_trend_value = sl_trend_pips * pips_unit
-    tp_range_value = tp_range_pips * pips_unit
-    sl_range_value = sl_range_pips * pips_unit
-
+    tp = tp_pips * pips_unit
+    sl = sl_pips * pips_unit
     open_, close = open_.reset_index(drop=True), close.reset_index(drop=True)
     high, low = high.reset_index(drop=True), low.reset_index(drop=True)
     balance = start_balance
-    balance_curve = [balance]
-
     for i, sig in enumerate(signals):
-        if sig in ("TREND_UP", "REVERSE_UP", "TREND_DOWN", "REVERSE_DOWN") and i + entry_minutes + 1 < len(close):
-            entry_price = open_[i + 1] + spread if sig in ("TREND_UP", "REVERSE_UP") else open_[i + 1] - spread
-            high_seq = high[i + 1 : i + 1 + entry_minutes]
-            low_seq = low[i + 1 : i + 1 + entry_minutes]
-            win = False
-
-            if sig in ("TREND_UP", "REVERSE_UP"):
-                if (high_seq >= entry_price + tp_trend_value).any() and not (low_seq <= entry_price - sl_trend_value).any():
-                    balance += lot * tp_trend_value * leverage
-                    win = True
-                elif (low_seq <= entry_price - sl_trend_value).any():
-                    balance -= lot * sl_trend_value * leverage
-                else:
+        if sig and i + entry_minutes + 1 < len(close):
+            price = close[i + 1] + spread if "BUY" in sig else close[i + 1] - spread
+            highs = high[i+1:i+1+entry_minutes]
+            lows = low[i+1:i+1+entry_minutes]
+            hit = False
+            if sig == "PULLBACK_BUY":
+                for idx, (h, l) in enumerate(zip(highs, lows)):
+                    # 損切
+                    if l <= price - sl <= h:
+                        balance -= lot * sl * leverage
+                        results.append(False)
+                        hit = True
+                        break
+                    # 利確
+                    elif l <= price + tp <= h:
+                        balance += lot * tp * leverage
+                        results.append(True)
+                        hit = True
+                        break
+                if not hit:
+                    # 約定しなかった場合、区間最後の終値で決済
                     exit_price = close[i + 1 + entry_minutes]
-                    profit = (exit_price - entry_price - spread) * lot * leverage
-                    balance += profit
-                    win = profit > 0
-            elif sig in ("TREND_DOWN", "REVERSE_DOWN"):
-                if (low_seq <= entry_price - tp_range_value).any() and not (high_seq >= entry_price + sl_range_value).any():
-                    balance += lot * tp_range_value * leverage
-                    win = True
-                elif (high_seq >= entry_price + sl_range_value).any():
-                    balance -= lot * sl_range_value * leverage
-                else:
+                    pnl = (exit_price - price) * lot * leverage
+                    balance += pnl
+                    results.append(pnl > 0)
+            elif sig == "PULLBACK_SELL":
+                for idx, (h, l) in enumerate(zip(highs, lows)):
+                    # 損切
+                    if l <= price + sl <= h:
+                        balance -= lot * sl * leverage
+                        results.append(False)
+                        hit = True
+                        break
+                    # 利確
+                    elif l <= price - tp <= h:
+                        balance += lot * tp * leverage
+                        results.append(True)
+                        hit = True
+                        break
+                if not hit:
+                    # 約定しなかった場合、区間最後の終値で決済
                     exit_price = close[i + 1 + entry_minutes]
-                    profit = (entry_price - exit_price - spread) * lot * leverage
-                    balance += profit
-                    win = profit > 0
-
+                    pnl = (price - exit_price) * lot * leverage
+                    balance += pnl
+                    results.append(pnl > 0)
             entries.append(i)
-            results.append(win)
-            balance_curve.append(balance)
-            if balance <= 0:
-                break
-
+        if balance <= 0:
+            break
     winrate = sum(results) / len(results) if results else None
-    if winrate is not None:
-        print(f"[WinRate] {winrate:.2%} ({len(results)} trades)")
-    else:
-        print(f"[WinRate] N/A (0 trades)")
-    print(f"[Final Balance] {balance:.2f} / Drawdown: {max(balance_curve) - min(balance_curve):.2f}")
+    print(f"[WinRate] {winrate:.2%} ({len(results)} trades)" if winrate else "[WinRate] N/A")
+    print(f"[Balance] {balance:.2f} (Start: {start_balance})")
     return winrate, entries, results, signals
 
-# === 勝率計算関数（TP/SL成立まで追跡型） ===
-def calc_winrate2(df, open_, close, high, low, tp_trend_pips=8, sl_trend_pips=4, tp_range_pips=4, sl_range_pips=2, spread=0.02, symbol="USDJPY", lot=1000, start_balance=50000, leverage=3):
-    high_lines, low_lines = dp_fit_lines(df['high'])
-    signals,_ = judge_trade_dp(df, high_lines, low_lines)
+def calc_winrate2(df, open_, close, high, low, g_trends, tp_pips=10, sl_pips=4, spread=0.02, symbol="USDJPY", lot=1000, start_balance=50000, leverage=3):
+    signals = judge_trade_dp(df, [], [], g_trends)
     entries, results = [], []
     pips_unit = 0.01 if "JPY" in symbol else 0.0001
-    tp_trend_value = tp_trend_pips * pips_unit
-    sl_trend_value = sl_trend_pips * pips_unit
-    tp_range_value = tp_range_pips * pips_unit
-    sl_range_value = sl_range_pips * pips_unit
+    tp = tp_pips * pips_unit
+    sl = sl_pips * pips_unit
     open_, close = open_.reset_index(drop=True), close.reset_index(drop=True)
     high, low = high.reset_index(drop=True), low.reset_index(drop=True)
     balance = start_balance
-    balance_curve = [balance]
-
     for i, sig in enumerate(signals):
-        if sig in ("TREND_UP", "REVERSE_UP", "TREND_DOWN", "REVERSE_DOWN") and i + 1 < len(open_):
-            entry_price = open_[i + 1] + spread if sig in ("TREND_UP", "REVERSE_UP") else open_[i + 1] - spread
-            t = 1
-            hit = None
-            while i + 1 + t < len(df):
-                high_t = high[i + 1 + t]
-                low_t = low[i + 1 + t]
-                if sig in ("TREND_UP", "REVERSE_UP"):
-                    if high_t >= entry_price + tp_trend_value:
-                        balance += lot * tp_trend_value * leverage
+        if sig and i + 1 < len(close):
+            price = close[i + 1] + spread if "BUY" in sig else close[i + 1] - spread
+            hit = False
+            for j in range(i + 1, len(close)):
+                h = high[j]
+                l = low[j]
+                if sig == "PULLBACK_BUY":
+                    # まず損切判定
+                    if l <= price - sl <= h:
+                        balance -= lot * sl * leverage
+                        results.append(False)
                         hit = True
                         break
-                    elif low_t <= entry_price - sl_trend_value:
-                        balance -= lot * sl_trend_value * leverage
-                        hit = False
-                        break
-                elif sig in ("TREND_DOWN", "REVERSE_DOWN"):
-                    if low_t <= entry_price - tp_range_value:
-                        balance += lot * tp_range_value * leverage
+                    # 次に利確判定
+                    elif l <= price + tp <= h:
+                        balance += lot * tp * leverage
+                        results.append(True)
                         hit = True
                         break
-                    elif high_t >= entry_price + sl_range_value:
-                        balance -= lot * sl_range_value * leverage
-                        hit = False
+                elif sig == "PULLBACK_SELL":
+                    # まず損切判定
+                    if l <= price + sl <= h:
+                        balance -= lot * sl * leverage
+                        results.append(False)
+                        hit = True
                         break
-                t += 1
-
-            if hit is None:
-                exit_price = close[min(i + 1 + t, len(close) - 1)]
-                profit = (exit_price - entry_price - spread) * lot * leverage if sig in ("TREND_UP", "REVERSE_UP") else (entry_price - exit_price - spread) * lot * leverage
-                balance += profit
-                hit = profit > 0
-
-            entries.append(i)
-            results.append(hit)
-            balance_curve.append(balance)
-            if balance <= 0:
-                break
-
-    
+                    # 次に利確判定
+                    elif l <= price - tp <= h:
+                        balance += lot * tp * leverage
+                        results.append(True)
+                        hit = True
+                        break
+            if not hit:
+                results.append(False)
+        entries.append(i)
+        if balance <= 0:
+            break
     winrate = sum(results) / len(results) if results else None
-    if winrate is not None:
-        print(f"[WinRate] {winrate:.2%} ({len(results)} trades)")
-    else:
-        print(f"[WinRate] N/A (0 trades)")
-    print(f"[Final Balance] {balance:.2f} / Drawdown: {max(balance_curve) - min(balance_curve):.2f}")
+    print(f"[WinRate] {winrate:.2%} ({len(results)} trades)" if winrate else "[WinRate] N/A")
+    print(f"[Balance] {balance:.2f} (Start: {start_balance})")
     return winrate, entries, results, signals
-
-# === 発注関数 ===
-def place_order(symbol, signal):
-    """
-    signal: "TREND_UP", "TREND_DOWN", "REVERSE_UP", "REVERSE_DOWN"
-    TREND_UP/REVERSE_UP → buy, TREND_DOWN/REVERSE_DOWN → sell
-    """
-    if signal in ("TREND_UP", "REVERSE_UP"):
-        order_type = 'buy'
-        price = mt5.symbol_info_tick(symbol).ask
-        sl = price - SL_PIPS * 0.01
-        tp = price + TP_PIPS * 0.01
-        order_type_mt5 = mt5.ORDER_TYPE_BUY
-    elif signal in ("TREND_DOWN", "REVERSE_DOWN"):
-        order_type = 'sell'
-        price = mt5.symbol_info_tick(symbol).bid
-        sl = price + SL_PIPS * 0.01
-        tp = price - TP_PIPS * 0.01
-        order_type_mt5 = mt5.ORDER_TYPE_SELL
-    else:
-        return "No order: invalid signal"
-
-    deviation = 5
-    request = {
-        "action": mt5.TRADE_ACTION_DEAL,
-        "symbol": symbol,
-        "volume": POSITION_SIZE,
-        "type": order_type_mt5,
-        "price": price,
-        "sl": sl,
-        "tp": tp,
-        "deviation": deviation,
-        "magic": 123456,
-        "comment": f"ScalpBot_{signal}",
-        "type_time": mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_IOC,
-    }
-    result = mt5.order_send(request)
-    return result
-
-# === データ取得と勝率計算 ===
+# === 実行 ===
 df = fetch_data(SYMBOL, TO_SYMBOL)
-calc_winrate(df, df['open'], df['close'], df['high'], df['low'])
-calc_winrate2(df, df['open'], df['close'], df['high'], df['low'])
+FXBase.candles = df.copy().reset_index()
+FXBase.candles['time_id'] = range(len(FXBase.candles))
+gtrend = g_trendlines()
+print(f"Trendlines generated: {len(gtrend)}")
+print(gtrend)
+calc_winrate(df, df['open'], df['close'], df['high'], df['low'], gtrend)
+calc_winrate2(df, df['open'], df['close'], df['high'], df['low'], gtrend)
 
 interval_minutes = 1  # 1分ごとに実行]
 last_run_minute = None

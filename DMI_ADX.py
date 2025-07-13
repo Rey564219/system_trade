@@ -244,18 +244,13 @@ def is_bullish_candles(df, n=2):
         if df.iloc[-i]['close'] <= df.iloc[-i]['open']:
             return False
     return True
-def is_ma_crossed(df, threshold=0.001):  # 0.001 = 0.1%
-    """
-    EMAクロス後、乖離率がthreshold以上ならTrue
-    """
+
+def is_ma_crossed(df):
     latest = df.iloc[-1]
+    prev = df.iloc[-2]
 
-    # クロス済み（短期 > 長期）かつ 乖離率が一定以上
-    if latest['ema_fast'] > latest['ema_slow']:
-        spread_ratio = (latest['ema_fast'] - latest['ema_slow']) / latest['ema_slow']
-        return spread_ratio >= threshold
-    return False
-
+    # クロス直後
+    return prev['ema_fast'] <= prev['ema_slow'] and latest['ema_fast'] > latest['ema_slow']
 def is_bb_breakout(df):
     latest = df.iloc[-1]
     return latest['close'] > latest['bb_upper']
@@ -265,12 +260,14 @@ def is_entry_trigger(df):
         is_ma_crossed(df) or
         is_bb_breakout(df)
     )
+
 def generate_technical_signal(df, adx_period=14, sma_short=5, sma_mid=20, adx_threshold=20):
     signals = []
     adx = df['ADX'].values
-    sma_s = df[f'SMA_{sma_short}'].values
-    sma_m = df[f'SMA_{sma_mid}'].values
+    plus_di = df[f'PLUS_DI'].values
+    minus_di = df[f'MINUS_DI'].values
     sma_l = df['SMA_100'].values
+    close = df['close'].values
     # === EMA（移動平均） ===
     df['ema_fast'] = talib.EMA(df['close'], timeperiod=5)
     df['ema_slow'] = talib.EMA(df['close'], timeperiod=20)
@@ -298,8 +295,8 @@ def generate_technical_signal(df, adx_period=14, sma_short=5, sma_mid=20, adx_th
         # adx_up = adx_now > adx_prev and adx_now >= adx_threshold
         # sma_s_up = sma_s[i] > sma_s[i-3]
         # sma_m_up = sma_m[i] > sma_m[i-3]
-        sma_order_up = sma_s[i] > sma_m[i]
-        sma_order_down = sma_s[i] < sma_m[i]
+        di_order_up = plus_di[i] > minus_di[i]
+        di_order_down = plus_di[i] < minus_di[i]
         # --- 追加フィルタ ---
         # bb_ok = bb_width[i] > bb_mean[i] * 0.68 if not np.isnan(bb_mean[i]) else False
         # rsi_ok = 32 < rsi[i] < 68
@@ -319,9 +316,9 @@ def generate_technical_signal(df, adx_period=14, sma_short=5, sma_mid=20, adx_th
         #     signals.append("PUT")
         # else:
         #     signals.append("HOLD")
-        if sma_order_up and sma_l[i] < df['close'][i] and trigger[i] and adx_now > adx_prev:
+        if di_order_up and adx_now > adx_prev and sma_l[i] < close[i] and trigger[i]:
             signals.append("CALL")
-        elif sma_order_down and sma_l[i] > df['close'][i] and trigger[i] and adx_now < adx_prev:
+        elif di_order_down and adx_now < adx_prev and sma_l[i] > close[i] and trigger[i]:
             signals.append("PUT")
         else:
             signals.append("HOLD")
@@ -527,7 +524,6 @@ def calc_winrate_technical2(
     print(f"[最終資金] {balance:.2f}円 / ドローダウン最大: {max(balance_curve) - min(balance_curve):.2f}円")
     return winrate, entries, results, signals
 
-# --- 必要に応じてML予測と組み合わせる例 ---
 def make_labels(df, tp_pips=10, sl_pips=5, entry_minutes=10, symbol="USD/JPY"):
     """
     一定pips動いたか（TP/SL）に基づいて CALL / PUT のラベルを生成する。
@@ -668,8 +664,9 @@ def make_train_data(folder_path, n_features=20):
     X = X.fillna(method='ffill').fillna(method='ffill')
     # --- 特徴量選択 ---
     features = ['atr', 'close', 'open', 'high', 'low',
-        'ADX','SMA_5', 'SMA_20','PLUS_DI', 'MINUS_DI'
+        'ADX','SMA_5', 'SMA_20','SMA_100', 'PLUS_DI', 'MINUS_DI'
     ]
+
     X = X.drop(['return_1min'], axis=1)
     drop_keywords = ['trend_direction', 'trend_duration', 'trend_duration_bucket', 'trend_confidence','return_1min']
     drop_cols = [col for col in price_data.columns if any(key in col for key in drop_keywords)]
@@ -756,24 +753,22 @@ pair = SYMBOL + TO_SYMBOL
 X_train, X_trainb, y_train, y_trainb, col, open_price, close, high, low, label, select, _, _, pca, scaler = make_train_data(pair, n_features=20)
 
 # fetch_dataを使ってテストデータ作成（SYMBOL, TO_SYMBOLは仮の値でOK）
-X_test, y_test, feature_names, open_test, close_test, high_test, low_test, label_test, _, _ = fetch_data(SYMBOL, TO_SYMBOL, None, None, None, None, None, None, n_features=20)
+X_test, y_test, feature_names, open_test, close_test, high_test, low_test, label_test, _, _ = fetch_data(SYMBOL, TO_SYMBOL, col, scaler, X_trainb, y_trainb, select, pca, n_features=20)
 df = X_train.copy()
 
 # X_testのインデックスがDatetimeIndexの場合
 X_test = X_test[X_test.index.weekday < 5]
 # --- パイプライン ---
 print('finish make_features')
-
-print('finish make_labels')
 df['rsi'] = calc_rsi(df['close'], window=14)
 X = df.dropna()
 
 features = [
     'atr', 'close', 'open', 'high', 'low',
-    'ADX','SMA_5', 'SMA_20','PLUS_DI', 'MINUS_DI'
+    'ADX','SMA_5', 'SMA_20','SMA_100', 'PLUS_DI', 'MINUS_DI'
 ]
-features = select
-X = X[features]
+# features = select
+X = X[select]
 def get_pips_scale(symbol):
     """
     通貨ペアに応じて1pipsあたりの数値を返す。
@@ -784,13 +779,13 @@ def get_pips_scale(symbol):
     else:
         return 0.0001
 pips = get_pips_scale(TO_SYMBOL)
-
 # --- 勝率計算ロジック追加 ---
-calc_winrate_technical(X_test, open_test, close_test, high_test, low_test)
+X_train, X_trainb, y_train, y_trainb, col, open_price, close, high, low, label, select, _, _, pca, scaler = make_train_data(pair, n_features=20)
+df = X_train.copy()
+calc_winrate_technical(X_test, open_test, close_test)
 calc_winrate_technical2(X_test, open_test, close_test, high_test, low_test)
 calc_winrate_technical(df, df['open'], df['close'], df['high'], df['low'])
 calc_winrate_technical2(df, df['open'], df['close'], df['high'], df['low'])
-
 def run_realtime_signals(SYMBOL, TO_SYMBOL, interval_minutes=1, n_features=20,tp_pips=6, sl_pips=3, spread=0.02, bet_ratio=0.01, min_bet=1000, start_balance=50000):
     pair = SYMBOL + TO_SYMBOL
     entry_minutes = 10
@@ -813,7 +808,7 @@ def run_realtime_signals(SYMBOL, TO_SYMBOL, interval_minutes=1, n_features=20,tp
 
         # データ取得
         X_test, _, _, open_test, close_test, high_test, low_test, _, _, _ = fetch_data(
-            SYMBOL, TO_SYMBOL, None, None, None, None, None, None, n_features=n_features
+            SYMBOL, TO_SYMBOL, col, None, X_trainb, y_trainb, select, pca, n_features=n_features
         )
         if X_test.empty:
             print("No new data available.")

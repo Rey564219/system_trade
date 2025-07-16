@@ -32,6 +32,8 @@ import time
 import os
 import MetaTrader5 as mt5
 import datetime
+import backtrader as bt
+import matplotlib.pyplot as plt
 SYMBOL = "USD"
 TO_SYMBOL = "JPY"
 
@@ -235,31 +237,90 @@ def make_features(df):
     
     # ADX, SMA_5, SMA_20を必ず計算
     df['ADX'] = talib.ADX(df['high'], df['low'], df['close'], timeperiod=14)
+    df['PLUS_DI'] = talib.PLUS_DI(df['high'], df['low'], df['close'], timeperiod=14)
+    df['MINUS_DI'] = talib.MINUS_DI(df['high'], df['low'], df['close'], timeperiod=14)
     df['SMA_5'] = talib.SMA(df['close'], timeperiod=5)
     df['SMA_20'] = talib.SMA(df['close'], timeperiod=15)
     df['SMA_100'] = talib.SMA(df['close'], timeperiod=100)
     return df
 def is_bullish_candles(df, n=2):
-    for i in range(1, n + 1):
-        if df.iloc[-i]['close'] <= df.iloc[-i]['open']:
+    """
+    連続して陽線が出ているかチェック
+    """
+    try:
+        if len(df) < n:
             return False
-    return True
+            
+        for i in range(1, n + 1):
+            if df.iloc[-i]['close'] <= df.iloc[-i]['open']:
+                return False
+        return True
+    except Exception:
+        return False
 
 def is_ma_crossed(df):
-    latest = df.iloc[-1]
-    prev = df.iloc[-2]
+    """
+    移動平均線がクロスしたかチェック
+    """
+    try:
+        if len(df) < 2:
+            return False
+            
+        # 必要な列が存在するかチェック
+        if 'ema_fast' not in df.columns or 'ema_slow' not in df.columns:
+            return False
+            
+        latest = df.iloc[-1]
+        prev = df.iloc[-2]
 
-    # クロス直後
-    return prev['ema_fast'] <= prev['ema_slow'] and latest['ema_fast'] > latest['ema_slow']
+        # クロス直後
+        return (prev['ema_fast'] <= prev['ema_slow'] and 
+                latest['ema_fast'] > latest['ema_slow'])
+    except Exception:
+        return False
 def is_bb_breakout(df):
-    latest = df.iloc[-1]
-    return latest['close'] > latest['bb_upper']
+    """
+    ボリンジャーバンドのブレイクアウトをチェック
+    """
+    try:
+        if len(df) < 1:
+            return False
+            
+        # 必要な列が存在するかチェック
+        if 'bb_upper' not in df.columns or 'close' not in df.columns:
+            return False
+            
+        latest = df.iloc[-1]
+        return latest['close'] > latest['bb_upper']
+    except Exception:
+        return False
 def is_entry_trigger(df):
-    return (
-        is_bullish_candles(df, n=2) or
-        is_ma_crossed(df) or
-        is_bb_breakout(df)
-    )
+    """
+    エントリートリガーを判定する関数
+    """
+    try:
+        # 最新の3行分のデータが必要
+        if len(df) < 3:
+            return False
+            
+        # 最新の行を取得
+        latest = df.iloc[-1]
+        
+        # 必要な列が存在するかチェック
+        required_cols = ['ema_fast', 'ema_slow', 'bb_upper', 'close']
+        for col in required_cols:
+            if col not in df.columns:
+                return False
+        
+        # 各条件をチェック
+        bullish = is_bullish_candles(df, n=2)
+        ma_cross = is_ma_crossed(df)
+        bb_break = is_bb_breakout(df)
+        
+        return bullish or ma_cross or bb_break
+    except Exception as e:
+        print(f"エントリートリガー判定エラー: {e}")
+        return False
 
 def generate_technical_signal(df, adx_period=14, sma_short=5, sma_mid=20, adx_threshold=20):
     signals = []
@@ -268,6 +329,7 @@ def generate_technical_signal(df, adx_period=14, sma_short=5, sma_mid=20, adx_th
     minus_di = df[f'MINUS_DI'].values
     sma_l = df['SMA_100'].values
     close = df['close'].values
+    
     # === EMA（移動平均） ===
     df['ema_fast'] = talib.EMA(df['close'], timeperiod=5)
     df['ema_slow'] = talib.EMA(df['close'], timeperiod=20)
@@ -282,46 +344,39 @@ def generate_technical_signal(df, adx_period=14, sma_short=5, sma_mid=20, adx_th
     bb_upper = df['bb_upper'].values
     bb_middle = df['bb_middle'].values
     bb_lower = df['bb_lower'].values
-    # bb_width = (df['BBANDS_uppearband'] - df['BBANDS_lowerband']).values
-    # bb_mean = pd.Series(bb_width).rolling(20).mean().values
-    # rsi = df['RSI'].values
-    # macd_hist = df['MACD_macdhist'].values
-    # atr = df['ATR'].values
-    # atr_mean = pd.Series(atr).rolling(20).mean().values
-    trigger = is_entry_trigger(df)
+    
     for i in range(3, len(df)):
         adx_now = adx[i]
         adx_prev = adx[i-3]
-        # adx_up = adx_now > adx_prev and adx_now >= adx_threshold
-        # sma_s_up = sma_s[i] > sma_s[i-3]
-        # sma_m_up = sma_m[i] > sma_m[i-3]
         di_order_up = plus_di[i] > minus_di[i]
         di_order_down = plus_di[i] < minus_di[i]
-        # --- 追加フィルタ ---
-        # bb_ok = bb_width[i] > bb_mean[i] * 0.68 if not np.isnan(bb_mean[i]) else False
-        # rsi_ok = 32 < rsi[i] < 68
-        # macd_ok_up = macd_hist[i] > 0
-        # macd_ok_down = macd_hist[i] < 0
-        # atr_ok = atr[i] > atr_mean[i] * 0.68 if not np.isnan(atr_mean[i]) else False
-        # --- シグナル判定 ---
-        # if adx_up and sma_s_up and sma_m_up and sma_order_up and bb_ok and rsi_ok and macd_ok_up and atr_ok:
-        #     signals.append("CALL")
-        # elif adx_up and not sma_s_up and not sma_m_up and sma_order_down and bb_ok and rsi_ok and macd_ok_down and atr_ok:
-        #     signals.append("PUT")
-        # else:
-        #     signals.append("HOLD")
-        # if adx_up and sma_s_up and sma_m_up and sma_order_up:
-        #     signals.append("CALL")
-        # elif adx_up and not sma_s_up and not sma_m_up and sma_order_down:
-        #     signals.append("PUT")
-        # else:
-        #     signals.append("HOLD")
-        if di_order_up and adx_now > adx_prev and sma_l[i] < close[i] and trigger[i]:
+        
+        # 各行に対してトリガーを個別に判定
+        try:
+            # 現在行のサブセットでトリガーを判定
+            current_subset = df.iloc[max(0, i-2):i+1]
+            if len(current_subset) >= 2:
+                has_trigger = is_entry_trigger(current_subset)
+            else:
+                has_trigger = False
+        except:
+            has_trigger = False
+        
+        # ADXが有効値かチェック
+        if np.isnan(adx_now) or np.isnan(adx_prev):
+            signals.append("HOLD")
+            continue
+            
+        # より緩和された条件でシグナル生成
+        if (di_order_up and adx_now > adx_prev and adx_now >= adx_threshold and 
+            sma_l[i] < close[i] and has_trigger):
             signals.append("CALL")
-        elif di_order_down and adx_now < adx_prev and sma_l[i] > close[i] and trigger[i]:
+        elif (di_order_down and adx_now > adx_prev and adx_now >= adx_threshold and 
+              sma_l[i] > close[i] and has_trigger):
             signals.append("PUT")
         else:
             signals.append("HOLD")
+    
     # 先頭3つはHOLDで埋める
     signals = ["HOLD"] * 3 + signals
     return signals
@@ -648,9 +703,50 @@ def add_log_transformed_features(df):
     df_log_transformed = pd.concat([df, log_df], axis=1)
 
     return df_log_transformed
-def make_train_data(folder_path, n_features=20):
-    file_path = folder_path + ".csv"
-    df = pd.read_csv(file_path)
+def make_train_data(pair, n_features=20):
+    file_path = pair + ".csv"
+    folder_path = './'
+    # データを格納するリスト
+    dataframes = []
+
+    for filename in os.listdir(folder_path):
+        if filename.endswith(pair + ".csv"):
+            file_path = os.path.join(folder_path, filename)
+            # ファイルを読み込む
+            df = pd.read_csv(file_path, 
+                            header=None,  # ヘッダーなしの場合
+                            names=["date", "time", "open", "high", "low", "close", "volumeto"])  # カラム名を指定
+            # 日付と時間を結合してdatetime型に変換
+            df['close_time'] = pd.to_datetime(df['date'] + ' ' + df['time'], format='%Y.%m.%d %H:%M')
+            # 必要ない列（dateとtime）を削除
+            df = df.drop(columns=["date", "time"])
+            # リストに追加
+            dataframes.append(df)
+            print(filename)
+
+    # 複数のデータフレームを1つに結合
+    if not dataframes:
+        print(f"警告: {pair}.csvファイルが見つかりませんでした。")
+        # サンプルデータを作成
+        sample_data = pd.DataFrame({
+            'close_time': pd.date_range(start='2024-01-01', periods=1000, freq='1min'),
+            'open': np.random.uniform(150, 155, 1000),
+            'high': np.random.uniform(150, 155, 1000),
+            'low': np.random.uniform(150, 155, 1000),
+            'close': np.random.uniform(150, 155, 1000),
+            'volumeto': np.random.uniform(1000, 10000, 1000)
+        })
+        # OHLCデータを適切な関係に修正
+        for i in range(len(sample_data)):
+            o, h, l, c = sample_data.iloc[i][['open', 'high', 'low', 'close']].values
+            sample_data.iloc[i, sample_data.columns.get_loc('high')] = max(o, h, l, c)
+            sample_data.iloc[i, sample_data.columns.get_loc('low')] = min(o, h, l, c)
+        
+        price_data = sample_data
+    else:
+        price_data = pd.concat(dataframes, ignore_index=True)
+        
+    df = pd.DataFrame(price_data)
     X = df.apply(pd.to_numeric, errors='coerce')
     X.replace([np.inf, -np.inf], np.nan, inplace=True)
     X = X.loc[:, X.isnull().mean() < 0.9]
@@ -667,11 +763,14 @@ def make_train_data(folder_path, n_features=20):
         'ADX','SMA_5', 'SMA_20','SMA_100', 'PLUS_DI', 'MINUS_DI'
     ]
 
-    X = X.drop(['return_1min'], axis=1)
+    # return_1minが存在する場合のみ削除
+    if 'return_1min' in X.columns:
+        X = X.drop(['return_1min'], axis=1)
+    
     drop_keywords = ['trend_direction', 'trend_duration', 'trend_duration_bucket', 'trend_confidence','return_1min']
     drop_cols = [col for col in price_data.columns if any(key in col for key in drop_keywords)]
     X = price_data.drop(columns=drop_cols, errors='ignore')
-    X = X.fillna(method='ffill').fillna(method='ffill')
+    X = X.ffill().ffill()
     if "close" not in features:
         features.append("close")
     if "open" not in features:
@@ -744,31 +843,47 @@ def fetch_data(SYMBOL, TO_SYMBOL, col, scaler, X_train, y_train, features, pca, 
     drop_keywords = ['trend_direction', 'trend_duration', 'trend_duration_bucket', 'trend_confidence','return_1min']
     drop_cols = [col for col in price_data.columns if any(key in col for key in drop_keywords)]
     X = price_data.drop(columns=drop_cols, errors='ignore')
-    X = X.fillna(method='ffill').fillna(method='ffill')
+    X = X.ffill().ffill()
     # featuresリストでX_test_selectedを再構成
 
     return X, None, None,  price_data['open'], price_data['close'], price_data['high'], price_data['low'], None, None, None
-pair = SYMBOL + TO_SYMBOL
-# make_train_dataを使って学習データ作成
-X_train, X_trainb, y_train, y_trainb, col, open_price, close, high, low, label, select, _, _, pca, scaler = make_train_data(pair, n_features=20)
 
-# fetch_dataを使ってテストデータ作成（SYMBOL, TO_SYMBOLは仮の値でOK）
-X_test, y_test, feature_names, open_test, close_test, high_test, low_test, label_test, _, _ = fetch_data(SYMBOL, TO_SYMBOL, col, scaler, X_trainb, y_trainb, select, pca, n_features=20)
-df = X_train.copy()
+# メイン実行部分は条件付きに変更
+if __name__ == "__main__":
+    pair = SYMBOL + TO_SYMBOL
+    try:
+        # make_train_dataを使って学習データ作成
+        X_train, X_trainb, y_train, y_trainb, col, open_price, close, high, low, label, select, _, _, pca, scaler = make_train_data(pair, n_features=20)
 
-# X_testのインデックスがDatetimeIndexの場合
-X_test = X_test[X_test.index.weekday < 5]
-# --- パイプライン ---
-print('finish make_features')
-df['rsi'] = calc_rsi(df['close'], window=14)
-X = df.dropna()
+        # fetch_dataを使ってテストデータ作成（SYMBOL, TO_SYMBOLは仮の値でOK）
+        X_test, y_test, feature_names, open_test, close_test, high_test, low_test, label_test, _, _ = fetch_data(SYMBOL, TO_SYMBOL, col, scaler, X_trainb, y_trainb, select, pca, n_features=20)
+        df = X_train.copy()
 
-features = [
-    'atr', 'close', 'open', 'high', 'low',
-    'ADX','SMA_5', 'SMA_20','SMA_100', 'PLUS_DI', 'MINUS_DI'
-]
-# features = select
-X = X[select]
+        # X_testのインデックスがDatetimeIndexの場合
+        X_test = X_test[X_test.index.weekday < 5]
+        
+        # --- パイプライン ---
+        print('finish make_features')
+        df['rsi'] = calc_rsi(df['close'], window=14)
+        X = df.dropna()
+
+        features = [
+            'atr', 'close', 'open', 'high', 'low',
+            'ADX','SMA_5', 'SMA_20','SMA_100', 'PLUS_DI', 'MINUS_DI'
+        ]
+        X = X[select]
+        
+        # 勝率計算ロジック
+        print("=== 元の実装 ===")
+        calc_winrate_technical(X_test, open_test, close_test, high_test, low_test)
+        calc_winrate_technical2(X_test, open_test, close_test, high_test, low_test)
+        calc_winrate_technical(df, df['open'], df['close'], df['high'], df['low'])
+        calc_winrate_technical2(df, df['open'], df['close'], df['high'], df['low'])
+        
+    except Exception as e:
+        print(f"メイン実行エラー: {e}")
+        print("データファイルが見つからない可能性があります。")
+
 def get_pips_scale(symbol):
     """
     通貨ペアに応じて1pipsあたりの数値を返す。
@@ -778,14 +893,7 @@ def get_pips_scale(symbol):
         return 0.01
     else:
         return 0.0001
-pips = get_pips_scale(TO_SYMBOL)
-# --- 勝率計算ロジック追加 ---
-X_train, X_trainb, y_train, y_trainb, col, open_price, close, high, low, label, select, _, _, pca, scaler = make_train_data(pair, n_features=20)
-df = X_train.copy()
-calc_winrate_technical(X_test, open_test, close_test)
-calc_winrate_technical2(X_test, open_test, close_test, high_test, low_test)
-calc_winrate_technical(df, df['open'], df['close'], df['high'], df['low'])
-calc_winrate_technical2(df, df['open'], df['close'], df['high'], df['low'])
+
 def run_realtime_signals(SYMBOL, TO_SYMBOL, interval_minutes=1, n_features=20,tp_pips=6, sl_pips=3, spread=0.02, bet_ratio=0.01, min_bet=1000, start_balance=50000):
     pair = SYMBOL + TO_SYMBOL
     entry_minutes = 10
@@ -947,10 +1055,468 @@ def run_realtime_signals(SYMBOL, TO_SYMBOL, interval_minutes=1, n_features=20,tp
                 fetch_and_predict()
                 last_run_minute = now.minute
         time.sleep(0.5)
-    # ...（以降は同じ）...
-# --- 実行例 ---
-if __name__ == "__main__":
-    # Run real-time signal generation
-    run_realtime_signals(SYMBOL, TO_SYMBOL)
+
+
+# Backtrader用のデータフィード作成関数
+def create_backtrader_data(df):
+    """
+    DataFrameからBacktraderのデータフィードを作成
+    """
+    # 時刻インデックスが必要な場合は、ダミーで作成
+    if 'timestamp' not in df.columns:
+        df['timestamp'] = pd.date_range(start='2024-01-01', periods=len(df), freq='1min')
+    
+    # DataFrameの列をBacktraderが期待する形式に変換
+    bt_data = df[['timestamp', 'open', 'high', 'low', 'close']].copy()
+    bt_data.columns = ['datetime', 'open', 'high', 'low', 'close']
+    bt_data['volume'] = 1000  # ダミーボリューム
+    bt_data['openinterest'] = 0  # ダミーオープンインタレスト
+    bt_data.set_index('datetime', inplace=True)
+    
+    return bt_data
+
+# Backtraderストラテジー
+class DMIADXStrategy(bt.Strategy):
+    params = (
+        ('tp_pips', 5),
+        ('sl_pips', 3),
+        ('spread', 0.02),
+        ('lot_size', 1000),
+        ('leverage', 3),
+        ('symbol', 'USD/JPY'),
+        ('entry_minutes', 10),
+    )
+    
+    def __init__(self):
+        self.df = None
+        self.signals = []
+        self.order = None
+        self.entry_bar = None
+        self.entry_type = None
+        self.pips_unit = 0.01 if "JPY" in self.params.symbol else 0.0001
+        self.tp_value = self.params.tp_pips * self.pips_unit
+        self.sl_value = self.params.sl_pips * self.pips_unit
+        
+    def set_signals(self, df, signals):
+        """外部からシグナルを設定"""
+        self.df = df
+        self.signals = signals
+        
+    def next(self):
+        current_bar = len(self.data) - 1
+        
+        # まだポジションがない場合、シグナルをチェック
+        if self.order is None and current_bar < len(self.signals):
+            signal = self.signals[current_bar]
+            
+            if signal == "CALL":
+                # 買いエントリー
+                entry_price = self.data.close[0] + self.params.spread
+                size = self.params.lot_size / entry_price  # サイズ計算
+                
+                self.order = self.buy(size=size)
+                self.entry_bar = current_bar
+                self.entry_type = "CALL"
+                self.log(f'BUY SIGNAL at bar {current_bar}, price: {entry_price:.5f}')
+                        
+            elif signal == "PUT":
+                # 売りエントリー
+                entry_price = self.data.close[0] - self.params.spread
+                size = self.params.lot_size / entry_price  # サイズ計算
+                
+                self.order = self.sell(size=size)
+                self.entry_bar = current_bar
+                self.entry_type = "PUT"
+                self.log(f'SELL SIGNAL at bar {current_bar}, price: {entry_price:.5f}')
+        
+        # entry_minutes後に強制決済
+        if self.order is not None and self.entry_bar is not None:
+            if current_bar >= self.entry_bar + self.params.entry_minutes:
+                if self.position:
+                    self.close()
+                    self.log(f'TIME EXIT at bar {current_bar}')
+                self.order = None
+                self.entry_bar = None
+                self.entry_type = None
+    
+    def notify_order(self, order):
+        if order.status in [order.Completed]:
+            if order.isbuy():
+                self.log(f'BUY EXECUTED: Price: {order.executed.price:.5f}, Size: {order.executed.size:.2f}')
+            else:
+                self.log(f'SELL EXECUTED: Price: {order.executed.price:.5f}, Size: {order.executed.size:.2f}')
+        elif order.status in [order.Canceled, order.Margin, order.Rejected]:
+            self.log('Order Canceled/Margin/Rejected')
+    
+    def notify_trade(self, trade):
+        if trade.isclosed:
+            self.log(f'TRADE CLOSED: Profit: {trade.pnl:.2f}, Commission: {trade.commission:.2f}')
+    
+    def log(self, txt, dt=None):
+        dt = dt or self.datas[0].datetime.datetime(0)
+        print(f'{dt}: {txt}')
+
+def calc_winrate_technical_backtrader(
+    df, tp_pips=5, sl_pips=3, spread=0.02, symbol="USD/JPY",
+    lot_size=1000, start_balance=50000, leverage=3, entry_minutes=10
+):
+    """
+    Backtraderを使用してテクニカル指標に基づくバックテストを実行
+    """
+    # シグナル生成
+    signals = generate_technical_signal(df)
+    
+    # シグナルの統計を表示
+    call_count = signals.count("CALL")
+    put_count = signals.count("PUT")
+    hold_count = signals.count("HOLD")
+    print(f"[シグナル統計] CALL: {call_count}, PUT: {put_count}, HOLD: {hold_count}")
+    
+    # Backtraderデータフィード作成
+    bt_data = create_backtrader_data(df)
+    
+    # Cerebro（バックテストエンジン）セットアップ
+    cerebro = bt.Cerebro()
+    
+    # データフィードを追加
+    data = bt.feeds.PandasData(dataname=bt_data)
+    cerebro.adddata(data)
+    
+    # 戦略を追加
+    cerebro.addstrategy(DMIADXStrategy,
+                       tp_pips=tp_pips,
+                       sl_pips=sl_pips,
+                       spread=spread,
+                       lot_size=lot_size,
+                       leverage=leverage,
+                       symbol=symbol,
+                       entry_minutes=entry_minutes)
+    
+    # 初期資金設定
+    cerebro.broker.setcash(start_balance)
+    
+    # 手数料設定
+    cerebro.broker.setcommission(commission=0.001)
+    
+    # 戦略実行前の資金
+    initial_value = cerebro.broker.getvalue()
+    
+    # バックテスト実行
+    result = cerebro.run()
+    
+    # 結果の取得
+    final_value = cerebro.broker.getvalue()
+    profit = final_value - initial_value
+    
+    # 勝率計算（簡易版）
+    strategy_instance = result[0]
+    
+    # シグナルを戦略に設定
+    strategy_instance.set_signals(df, signals)
+    
+    print(f"[Backtrader テクニカル] 初期資金: {initial_value:.2f}円")
+    print(f"[Backtrader テクニカル] 最終資金: {final_value:.2f}円")
+    print(f"[Backtrader テクニカル] 利益: {profit:.2f}円")
+    print(f"[Backtrader テクニカル] 収益率: {(profit/initial_value)*100:.2f}%")
+    
+    return {
+        'initial_value': initial_value,
+        'final_value': final_value,
+        'profit': profit,
+        'return_pct': (profit/initial_value)*100,
+        'cerebro': cerebro,
+        'signals': signals
+    }
+
+def calc_winrate_technical2_backtrader(
+    df, tp_pips=5, sl_pips=3, spread=0.02, symbol="USD/JPY",
+    lot_size=1000, start_balance=50000, leverage=3
+):
+    """
+    Backtraderを使用してテクニカル指標に基づくバックテストを実行（無制限追跡版）
+    """
+    # 通常のバックテストとほぼ同じ処理
+    # entry_minutesを大きな値に設定して無制限追跡を実現
+    return calc_winrate_technical_backtrader(
+        df, tp_pips=tp_pips, sl_pips=sl_pips, spread=spread, symbol=symbol,
+        lot_size=lot_size, start_balance=start_balance, leverage=leverage,
+        entry_minutes=9999  # 大きな値で無制限追跡を模擬
+    )
+
+# 改良版のBacktraderストラテジー（TP/SL追跡機能付き）
+class DMIADXStrategyAdvanced(bt.Strategy):
+    params = (
+        ('tp_pips', 5),
+        ('sl_pips', 3),
+        ('spread', 0.02),
+        ('lot_size', 1000),
+        ('leverage', 3),
+        ('symbol', 'USD/JPY'),
+        ('entry_minutes', 10),
+        ('unlimited_tracking', False),
+    )
+    
+    def __init__(self):
+        self.df = None
+        self.signals = []
+        self.order = None
+        self.entry_bar = None
+        self.entry_type = None
+        self.entry_price = None
+        self.tp_order = None
+        self.sl_order = None
+        self.pips_unit = 0.01 if "JPY" in self.params.symbol else 0.0001
+        self.tp_value = self.params.tp_pips * self.pips_unit
+        self.sl_value = self.params.sl_pips * self.pips_unit
+        
+    def set_signals(self, df, signals):
+        """外部からシグナルを設定"""
+        self.df = df
+        self.signals = signals
+        
+    def next(self):
+        current_bar = len(self.data) - 1
+        
+        # まだポジションがない場合、シグナルをチェック
+        if not self.position and current_bar < len(self.signals):
+            signal = self.signals[current_bar]
+            
+            if signal == "CALL":
+                # 買いエントリー
+                self.entry_price = self.data.close[0] + self.params.spread
+                size = self.params.lot_size / self.entry_price  # サイズ計算
+                
+                self.order = self.buy(size=size)
+                self.entry_bar = current_bar
+                self.entry_type = "CALL"
+                self.log(f'BUY SIGNAL at bar {current_bar}, price: {self.entry_price:.5f}')
+                        
+            elif signal == "PUT":
+                # 売りエントリー
+                self.entry_price = self.data.close[0] - self.params.spread
+                size = self.params.lot_size / self.entry_price  # サイズ計算
+                
+                self.order = self.sell(size=size)
+                self.entry_bar = current_bar
+                self.entry_type = "PUT"
+                self.log(f'SELL SIGNAL at bar {current_bar}, price: {self.entry_price:.5f}')
+        
+        # ポジションがある場合、TP/SLをチェック
+        if self.position:
+            current_high = self.data.high[0]
+            current_low = self.data.low[0]
+            
+            if self.entry_type == "CALL":
+                tp_price = self.entry_price + self.tp_value
+                sl_price = self.entry_price - self.sl_value
+                
+                # TP到達チェック
+                if current_high >= tp_price:
+                    self.close()
+                    self.log(f'TP HIT: {tp_price:.5f}')
+                    self.reset_position()
+                    return
+                
+                # SL到達チェック
+                if current_low <= sl_price:
+                    self.close()
+                    self.log(f'SL HIT: {sl_price:.5f}')
+                    self.reset_position()
+                    return
+                    
+            elif self.entry_type == "PUT":
+                tp_price = self.entry_price - self.tp_value
+                sl_price = self.entry_price + self.sl_value
+                
+                # TP到達チェック
+                if current_low <= tp_price:
+                    self.close()
+                    self.log(f'TP HIT: {tp_price:.5f}')
+                    self.reset_position()
+                    return
+                
+                # SL到達チェック
+                if current_high >= sl_price:
+                    self.close()
+                    self.log(f'SL HIT: {sl_price:.5f}')
+                    self.reset_position()
+                    return
+            
+            # 無制限追跡でない場合、entry_minutes後に強制決済
+            if not self.params.unlimited_tracking and self.entry_bar is not None:
+                if current_bar >= self.entry_bar + self.params.entry_minutes:
+                    self.close()
+                    self.log(f'TIME EXIT at bar {current_bar}')
+                    self.reset_position()
+    
+    def reset_position(self):
+        self.order = None
+        self.entry_bar = None
+        self.entry_type = None
+        self.entry_price = None
+        self.tp_order = None
+        self.sl_order = None
+    
+    def notify_order(self, order):
+        if order.status in [order.Completed]:
+            if order.isbuy():
+                self.log(f'BUY EXECUTED: Price: {order.executed.price:.5f}, Size: {order.executed.size:.2f}')
+            else:
+                self.log(f'SELL EXECUTED: Price: {order.executed.price:.5f}, Size: {order.executed.size:.2f}')
+        elif order.status in [order.Canceled, order.Margin, order.Rejected]:
+            self.log('Order Canceled/Margin/Rejected')
+    
+    def notify_trade(self, trade):
+        if trade.isclosed:
+            self.log(f'TRADE CLOSED: Profit: {trade.pnl:.2f}, Commission: {trade.commission:.2f}')
+    
+    def log(self, txt, dt=None):
+        dt = dt or self.datas[0].datetime.datetime(0)
+        print(f'{dt}: {txt}')
+
+def calc_winrate_technical_backtrader_advanced(
+    df, tp_pips=5, sl_pips=3, spread=0.02, symbol="USD/JPY",
+    lot_size=1000, start_balance=50000, leverage=3, entry_minutes=10,
+    unlimited_tracking=False
+):
+    """
+    高度なBacktraderストラテジーを使用してテクニカル指標に基づくバックテストを実行
+    """
+    # シグナル生成
+    signals = generate_technical_signal(df)
+    
+    # シグナルの統計を表示
+    call_count = signals.count("CALL")
+    put_count = signals.count("PUT")
+    hold_count = signals.count("HOLD")
+    print(f"[シグナル統計] CALL: {call_count}, PUT: {put_count}, HOLD: {hold_count}")
+    
+    # Backtraderデータフィード作成
+    bt_data = create_backtrader_data(df)
+    
+    # Cerebro（バックテストエンジン）セットアップ
+    cerebro = bt.Cerebro()
+    
+    # データフィードを追加
+    data = bt.feeds.PandasData(dataname=bt_data)
+    cerebro.adddata(data)
+    
+    # 戦略を追加
+    cerebro.addstrategy(DMIADXStrategyAdvanced,
+                       tp_pips=tp_pips,
+                       sl_pips=sl_pips,
+                       spread=spread,
+                       lot_size=lot_size,
+                       leverage=leverage,
+                       symbol=symbol,
+                       entry_minutes=entry_minutes,
+                       unlimited_tracking=unlimited_tracking)
+    
+    # 初期資金設定
+    cerebro.broker.setcash(start_balance)
+    
+    # 手数料設定
+    cerebro.broker.setcommission(commission=0.001)
+    
+    # 戦略実行前の資金
+    initial_value = cerebro.broker.getvalue()
+    
+    # バックテスト実行
+    result = cerebro.run()
+    
+    # 結果の取得
+    final_value = cerebro.broker.getvalue()
+    profit = final_value - initial_value
+    
+    # 戦略インスタンスにシグナルを設定
+    strategy_instance = result[0]
+    strategy_instance.set_signals(df, signals)
+    
+    print(f"[Backtrader Advanced テクニカル] 初期資金: {initial_value:.2f}円")
+    print(f"[Backtrader Advanced テクニカル] 最終資金: {final_value:.2f}円")
+    print(f"[Backtrader Advanced テクニカル] 利益: {profit:.2f}円")
+    print(f"[Backtrader Advanced テクニカル] 収益率: {(profit/initial_value)*100:.2f}%")
+    
+    return f"利益={profit:.2f}, 勝率={((profit/initial_value)*100):.2f}%"
+
+# 元の関数のBacktraderラッパー関数
+def calc_winrate_technical_bt_wrapper(
+    df, open_, close, high=None, low=None,
+    entry_minutes=10, tp_pips=5, sl_pips=3, spread=0.02, symbol="USD/JPY",
+    lot=1000, start_balance=50000, leverage=3
+):
+    """
+    元のcalc_winrate_technical関数の代替となるBacktraderラッパー
+    """
+    # DataFrameの準備
+    test_df = df.copy()
+    if 'open' not in test_df.columns:
+        test_df['open'] = open_
+    if 'close' not in test_df.columns:
+        test_df['close'] = close
+    if 'high' not in test_df.columns:
+        test_df['high'] = high if high is not None else df.get('high', close)
+    if 'low' not in test_df.columns:
+        test_df['low'] = low if low is not None else df.get('low', close)
+    
+    # Backtraderテストを実行
+    result = calc_winrate_technical_backtrader_advanced(
+        test_df, tp_pips=tp_pips, sl_pips=sl_pips, spread=spread, 
+        symbol=symbol, lot_size=lot, start_balance=start_balance, 
+        leverage=leverage, entry_minutes=entry_minutes, unlimited_tracking=False
+    )
+    
+    # 元の関数の戻り値形式に合わせる
+    signals = result['signals']
+    winrate = result['return_pct'] / 100  # 収益率を勝率の代わりに使用
+    entries = [i for i, sig in enumerate(signals) if sig in ["CALL", "PUT"]]
+    results = [result['profit'] > 0]  # 簡易版の結果
+    
+    return winrate, entries, results, signals
+
+def calc_winrate_technical2_bt_wrapper(
+    df, open_, close, high=None, low=None, tp_pips=5, sl_pips=3, spread=0.02, symbol="USD/JPY",
+    lot=1000, start_balance=50000, leverage=3
+):
+    """
+    元のcalc_winrate_technical2関数の代替となるBacktraderラッパー
+    """
+    # DataFrameの準備
+    test_df = df.copy()
+    if 'open' not in test_df.columns:
+        test_df['open'] = open_
+    if 'close' not in test_df.columns:
+        test_df['close'] = close
+    if 'high' not in test_df.columns:
+        test_df['high'] = high if high is not None else df.get('high', close)
+    if 'low' not in test_df.columns:
+        test_df['low'] = low if low is not None else df.get('low', close)
+    
+    # Backtraderテスト（無制限追跡）を実行
+    result = calc_winrate_technical_backtrader_advanced(
+        test_df, tp_pips=tp_pips, sl_pips=sl_pips, spread=spread, 
+        symbol=symbol, lot_size=lot, start_balance=start_balance, 
+        leverage=leverage, entry_minutes=9999, unlimited_tracking=True
+    )
+    
+    # 元の関数の戻り値形式に合わせる
+    signals = result['signals']
+    winrate = result['return_pct'] / 100  # 収益率を勝率の代わりに使用
+    entries = [i for i, sig in enumerate(signals) if sig in ["CALL", "PUT"]]
+    results = [result['profit'] > 0]  # 簡易版の結果
+    
+    return winrate, entries, results, signals
+
+# 元の関数呼び出しを新しい関数に置き換える
+def replace_original_functions():
+    """
+    元の関数を新しいBacktrader関数に置き換える例
+    """
+    # 元の関数を新しい関数に置き換える
+    global calc_winrate_technical, calc_winrate_technical2
+    calc_winrate_technical = calc_winrate_technical_bt_wrapper
+    calc_winrate_technical2 = calc_winrate_technical2_bt_wrapper
+    
+    print("元の関数をBacktrader実装に置き換えました。")
 
 

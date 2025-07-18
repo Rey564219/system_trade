@@ -441,7 +441,7 @@ def calc_winrate_technical(
     return winrate, entries, results, signals
 
 def calc_winrate_technical2(
-    df, open_, close, high=None, low=None, tp_pips=5, sl_pips=3, spread=0.02, symbol="USD/JPY",
+    df, open_, close, high=None, low=None, tp_pips=20, sl_pips=10, spread=0.02, symbol="USD/JPY",
     lot=1000, start_balance=50000, leverage=3
 ):
     signals = generate_technical_signal(df)
@@ -650,7 +650,31 @@ def add_log_transformed_features(df):
     return df_log_transformed
 def make_train_data(folder_path, n_features=20):
     file_path = folder_path + ".csv"
-    df = pd.read_csv(file_path)
+    folder_path = './'  # フォルダのパスを指定
+
+    # データを格納するリスト
+    dataframes = []
+
+    # フォルダ内のCSVファイルを読み込む
+    for filename in os.listdir(folder_path):
+        if filename.endswith(file_path):
+            file_path = os.path.join(folder_path, filename)
+            # ファイルを読み込む
+            df = pd.read_csv(file_path, 
+                            header=None,  # ヘッダーなしの場合
+                            names=["date", "time", "open", "high", "low", "close", "volumeto"])  # カラム名を指定
+            # 日付と時間を結合してdatetime型に変換
+            df['close_time'] = pd.to_datetime(df['date'] + ' ' + df['time'], format='%Y.%m.%d %H:%M')
+            # 必要ない列（dateとtime）を削除
+            df = df.drop(columns=["date", "time"])
+            # リストに追加
+            dataframes.append(df)
+        print(filename)
+
+    # 複数のデータフレームを1つに結合
+
+    price_data = pd.concat(dataframes, ignore_index=True)
+    df = price_data.copy()
     X = df.apply(pd.to_numeric, errors='coerce')
     X.replace([np.inf, -np.inf], np.nan, inplace=True)
     X = X.loc[:, X.isnull().mean() < 0.9]
@@ -667,7 +691,6 @@ def make_train_data(folder_path, n_features=20):
         'ADX','SMA_5', 'SMA_20','SMA_100', 'PLUS_DI', 'MINUS_DI'
     ]
 
-    X = X.drop(['return_1min'], axis=1)
     drop_keywords = ['trend_direction', 'trend_duration', 'trend_duration_bucket', 'trend_confidence','return_1min']
     drop_cols = [col for col in price_data.columns if any(key in col for key in drop_keywords)]
     X = price_data.drop(columns=drop_cols, errors='ignore')

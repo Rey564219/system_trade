@@ -235,9 +235,11 @@ def make_features(df):
     
     # ADX, SMA_5, SMA_20を必ず計算
     df['ADX'] = talib.ADX(df['high'], df['low'], df['close'], timeperiod=14)
-    df['SMA_5'] = talib.SMA(df['close'], timeperiod=5)
-    df['SMA_20'] = talib.SMA(df['close'], timeperiod=15)
+    df['SMA_5'] = talib.SMA(df['close'], timeperiod=10)
+    df['SMA_20'] = talib.SMA(df['close'], timeperiod=25)
     df['SMA_100'] = talib.SMA(df['close'], timeperiod=100)
+    df['PLUS_DI'] = talib.PLUS_DI(df['high'], df['low'], df['close'], timeperiod=14)
+    df['MINUS_DI'] = talib.MINUS_DI(df['high'], df['low'], df['close'], timeperiod=14)
     return df
 def is_bullish_candles(df, n=2):
     for i in range(1, n + 1):
@@ -291,160 +293,117 @@ def generate_technical_signal(df, adx_period=14, sma_short=5, sma_mid=20, adx_th
     # macd_hist = df['MACD_macdhist'].values
     # atr = df['ATR'].values
     # atr_mean = pd.Series(atr).rolling(20).mean().values
-    trigger = is_entry_trigger(df)
     for i in range(3, len(df)):
         adx_now = adx[i]
         adx_prev = adx[i-3]
-        # adx_up = adx_now > adx_prev and adx_now >= adx_threshold
-        # sma_s_up = sma_s[i] > sma_s[i-3]
-        # sma_m_up = sma_m[i] > sma_m[i-3]
         sma_order_up = sma_s[i] > sma_m[i]
         sma_order_down = sma_s[i] < sma_m[i]
-        # --- 追加フィルタ ---
-        # bb_ok = bb_width[i] > bb_mean[i] * 0.68 if not np.isnan(bb_mean[i]) else False
-        # rsi_ok = 32 < rsi[i] < 68
-        # macd_ok_up = macd_hist[i] > 0
-        # macd_ok_down = macd_hist[i] < 0
-        # atr_ok = atr[i] > atr_mean[i] * 0.68 if not np.isnan(atr_mean[i]) else False
-        # --- シグナル判定 ---
-        # if adx_up and sma_s_up and sma_m_up and sma_order_up and bb_ok and rsi_ok and macd_ok_up and atr_ok:
-        #     signals.append("CALL")
-        # elif adx_up and not sma_s_up and not sma_m_up and sma_order_down and bb_ok and rsi_ok and macd_ok_down and atr_ok:
-        #     signals.append("PUT")
-        # else:
-        #     signals.append("HOLD")
-        # if adx_up and sma_s_up and sma_m_up and sma_order_up:
-        #     signals.append("CALL")
-        # elif adx_up and not sma_s_up and not sma_m_up and sma_order_down:
-        #     signals.append("PUT")
-        # else:
-        #     signals.append("HOLD")
-        if sma_order_up and sma_l[i] < df['close'][i] and trigger[i] and adx_now > adx_prev:
+        # triggerを都度判定
+        trigger = is_entry_trigger(df.iloc[:i+1])
+        if sma_order_up and sma_l[i] < df['close'][i] and trigger and adx_now > adx_prev:
             signals.append("CALL")
-        elif sma_order_down and sma_l[i] > df['close'][i] and trigger[i] and adx_now < adx_prev:
+        elif sma_order_down and sma_l[i] > df['close'][i] and trigger and adx_now > adx_prev:
             signals.append("PUT")
         else:
             signals.append("HOLD")
     # 先頭3つはHOLDで埋める
     signals = ["HOLD"] * 3 + signals
     return signals
-# def calc_winrate_technical(df,open, close, entry_minutes=10):
-#     """
-#     テクニカル指標によるシグナルでの勝率計算
-#     df: 特徴量付きDataFrame
-#     close: 終値Series
-#     entry_minutes: エントリー後の判定分数
-#     """
+
+# def calc_winrate_technical(
+#     df, open_, close, high=None, low=None,
+#     entry_minutes=10, tp_pips=5, sl_pips=3, spread=0.02, symbol="USD/JPY",
+#     lot=1000, start_balance=50000, leverage=3
+# ):
 #     signals = generate_technical_signal(df)
 #     entries = []
 #     results = []
+#     pips_unit = 0.01 if "JPY" in symbol else 0.0001
+#     tp_value = tp_pips * pips_unit
+#     sl_value = sl_pips * pips_unit
+
+#     open_ = open_.reset_index(drop=True)
 #     close = close.reset_index(drop=True)
+#     if high is None:
+#         high = df["high"].reset_index(drop=True)
+#     else:
+#         high = high.reset_index(drop=True)
+#     if low is None:
+#         low = df["low"].reset_index(drop=True)
+#     else:
+#         low = low.reset_index(drop=True)
+#     adx = df['ADX'].values
+
+#     balance = start_balance
+#     balance_curve = [balance]
+
 #     for i, sig in enumerate(signals):
 #         if sig in ("CALL", "PUT"):
-#             if i+entry_minutes+1 < len(close) and i+1 < len(close):
-#                 entry_price = close[i+1]
-#                 exit_price = close[i+1+entry_minutes]
-#                 win = (exit_price > entry_price + 0.02) if sig == "CALL" else (exit_price < entry_price - 0.02)
+#             if i + entry_minutes + 1 < len(close) and i + 1 < len(open_):
+#                 entry_price = close[i + 1] + spread if sig == "CALL" else close[i + 1] - spread
+#                 win = False
+#                 if sig == "CALL" and adx[i] > 20:
+#                     tp_line = entry_price + tp_value
+#                     sl_line = entry_price - sl_value
+#                     for t in range(entry_minutes):
+#                         hi = high[i + 1 + t]
+#                         lo = low[i + 1 + t]
+#                         # 先にTP到達
+#                         if hi >= tp_line and lo <= tp_line:
+#                             gain = lot * tp_value * leverage
+#                             balance += gain
+#                             win = True
+#                             break
+#                         # 先にSL到達
+#                         elif hi >= sl_line and lo <= sl_line:
+#                             loss = lot * sl_value * leverage
+#                             balance -= loss
+#                             win = False
+#                             break
+#                     else:
+#                         # どちらも未到達→entry_minutes後のcloseで決済
+#                         exit_price = close[i + 1 + entry_minutes]
+#                         profit = (exit_price - entry_price - spread) * lot * leverage
+#                         balance += profit
+#                         win = profit > 0
+#                     balance_curve.append(balance)
+#                 elif sig == "PUT" and adx[i] > 20:
+#                     tp_line = entry_price - tp_value
+#                     sl_line = entry_price + sl_value
+#                     for t in range(entry_minutes):
+#                         hi = high[i + 1 + t]
+#                         lo = low[i + 1 + t]
+#                         if hi >= tp_line and lo <= tp_line:
+#                             gain = lot * tp_value * leverage
+#                             balance += gain
+#                             win = True
+#                             break
+#                         elif hi >= sl_line and lo <= sl_line:
+#                             loss = lot * sl_value * leverage
+#                             balance -= loss
+#                             win = False
+#                             break
+#                     else:
+#                         exit_price = close[i + 1 + entry_minutes]
+#                         profit = (entry_price - exit_price - spread) * lot * leverage
+#                         balance += profit
+#                         win = profit > 0
+#                     balance_curve.append(balance)
+
 #                 entries.append(i)
 #                 results.append(win)
+
+#                 if balance <= 0:
+#                     print("資金が尽きました。")
+#                     break
+
 #     winrate = sum(results) / len(results) if results else None
-#     print(f"[テクニカル] {entry_minutes}分 勝率: {winrate:.2%}" if winrate is not None else "[テクニカル] 勝率: データ不足")
+#     print(f"[テクニカル] {entry_minutes}分 TP/SL勝率: {winrate:.2%} ({len(results)}回)" if winrate is not None else "[テクニカル] 勝率: データ不足")
+#     print(f"[最終資金] {balance:.2f}円 / ドローダウン最大: {max(balance_curve) - min(balance_curve):.2f}円")
 #     return winrate, entries, results, signals
 
-def calc_winrate_technical(
-    df, open_, close, high=None, low=None,
-    entry_minutes=10, tp_pips=5, sl_pips=3, spread=0.02, symbol="USD/JPY",
-    lot=1000, start_balance=50000, leverage=3
-):
-    signals = generate_technical_signal(df)
-    entries = []
-    results = []
-    pips_unit = 0.01 if "JPY" in symbol else 0.0001
-    tp_value = tp_pips * pips_unit
-    sl_value = sl_pips * pips_unit
-
-    open_ = open_.reset_index(drop=True)
-    close = close.reset_index(drop=True)
-    if high is None:
-        high = df["high"].reset_index(drop=True)
-    else:
-        high = high.reset_index(drop=True)
-    if low is None:
-        low = df["low"].reset_index(drop=True)
-    else:
-        low = low.reset_index(drop=True)
-    adx = df['ADX'].values
-
-    balance = start_balance
-    balance_curve = [balance]
-
-    for i, sig in enumerate(signals):
-        if sig in ("CALL", "PUT"):
-            if i + entry_minutes + 1 < len(close) and i + 1 < len(open_):
-                entry_price = close[i + 1] + spread if sig == "CALL" else close[i + 1] - spread
-                win = False
-                if sig == "CALL" and adx[i] > 20:
-                    tp_line = entry_price + tp_value
-                    sl_line = entry_price - sl_value
-                    for t in range(entry_minutes):
-                        hi = high[i + 1 + t]
-                        lo = low[i + 1 + t]
-                        # 先にTP到達
-                        if hi >= tp_line and lo <= tp_line:
-                            gain = lot * tp_value * leverage
-                            balance += gain
-                            win = True
-                            break
-                        # 先にSL到達
-                        elif hi >= sl_line and lo <= sl_line:
-                            loss = lot * sl_value * leverage
-                            balance -= loss
-                            win = False
-                            break
-                    else:
-                        # どちらも未到達→entry_minutes後のcloseで決済
-                        exit_price = close[i + 1 + entry_minutes]
-                        profit = (exit_price - entry_price - spread) * lot * leverage
-                        balance += profit
-                        win = profit > 0
-                    balance_curve.append(balance)
-                elif sig == "PUT" and adx[i] > 20:
-                    tp_line = entry_price - tp_value
-                    sl_line = entry_price + sl_value
-                    for t in range(entry_minutes):
-                        hi = high[i + 1 + t]
-                        lo = low[i + 1 + t]
-                        if hi >= tp_line and lo <= tp_line:
-                            gain = lot * tp_value * leverage
-                            balance += gain
-                            win = True
-                            break
-                        elif hi >= sl_line and lo <= sl_line:
-                            loss = lot * sl_value * leverage
-                            balance -= loss
-                            win = False
-                            break
-                    else:
-                        exit_price = close[i + 1 + entry_minutes]
-                        profit = (entry_price - exit_price - spread) * lot * leverage
-                        balance += profit
-                        win = profit > 0
-                    balance_curve.append(balance)
-
-                entries.append(i)
-                results.append(win)
-
-                if balance <= 0:
-                    print("資金が尽きました。")
-                    break
-
-    winrate = sum(results) / len(results) if results else None
-    print(f"[テクニカル] {entry_minutes}分 TP/SL勝率: {winrate:.2%} ({len(results)}回)" if winrate is not None else "[テクニカル] 勝率: データ不足")
-    print(f"[最終資金] {balance:.2f}円 / ドローダウン最大: {max(balance_curve) - min(balance_curve):.2f}円")
-    return winrate, entries, results, signals
-
 def calc_winrate_technical2(
-    df, open_, close, high=None, low=None, tp_pips=5, sl_pips=3, spread=0.02, symbol="USD/JPY",
+    df, open_, close, high=None, low=None, tp_pips=20, sl_pips=10, spread=0.02, symbol="USD/JPY",
     lot=1000, start_balance=50000, leverage=3
 ):
     signals = generate_technical_signal(df)
@@ -464,57 +423,53 @@ def calc_winrate_technical2(
         low = df["low"].reset_index(drop=True)
     else:
         low = low.reset_index(drop=True)
+    if open_ is None:
+        open_ = df["open"].reset_index(drop=True)
+    else:
+        open_ = open_.reset_index(drop=True)
     adx = df['ADX'].values
 
     balance = start_balance
     balance_curve = [balance]
 
     for i, sig in enumerate(signals):
-        if sig in ("CALL", "PUT") and i + 1 < len(open_):
+        if sig in ("CALL", "PUT") and i + 2 < len(close):
             entry_price = close[i + 1] + spread if sig == "CALL" else close[i + 1] - spread
-            t = 0
-            hit = None
-            if sig == "CALL":
-                tp_line = entry_price + tp_value
-                sl_line = entry_price - sl_value
-                while i + 1 + t < len(df):
-                    hi = high[i + 1 + t]
-                    lo = low[i + 1 + t]
-                    if hi >= tp_line and lo <= tp_line:
-                        balance += lot * tp_value * leverage
-                        hit = True
-                        break
-                    elif hi >= sl_line and lo <= sl_line:
-                        balance -= lot * sl_value * leverage
-                        hit = False
-                        break
-                    t += 1
-                if hit is None:
-                    exit_price = close[min(i + 1 + t, len(close) - 1)]
+            tp_line = entry_price + tp_value if sig == "CALL" else entry_price - tp_value
+            sl_line = entry_price - sl_value if sig == "CALL" else entry_price + sl_value
+            exit_idx = None
+            # エントリー後、TP/SLにcloseが到達したら次の足で決済
+            for t in range(i + 2, len(close)):
+                c = close[t]
+                if sig == "CALL" and c >= tp_line:
+                    exit_idx = t + 1 if t + 1 < len(close) else t
+                    break
+                elif sig == "CALL" and c <= sl_line:
+                    exit_idx = t + 1 if t + 1 < len(close) else t
+                    break
+                elif sig == "PUT" and c <= tp_line:
+                    exit_idx = t + 1 if t + 1 < len(close) else t
+                    break
+                elif sig == "PUT" and c >= sl_line:
+                    exit_idx = t + 1 if t + 1 < len(close) else t
+                    break
+            if exit_idx is not None and exit_idx + 1 < len(open_):
+                exit_price = open_.iloc[exit_idx+1]
+                if sig == "CALL":
                     profit = (exit_price - entry_price - spread) * lot * leverage
-                    balance += profit
-                    hit = profit > 0
-            elif sig == "PUT":
-                tp_line = entry_price - tp_value
-                sl_line = entry_price + sl_value
-                while i + 1 + t < len(df):
-                    hi = high[i + 1 + t]
-                    lo = low[i + 1 + t]
-                    if hi >= tp_line and lo <= tp_line:
-                        balance += lot * tp_value * leverage
-                        hit = True
-                        break
-                    elif hi >= sl_line and lo <= sl_line:
-                        balance -= lot * sl_value * leverage
-                        hit = False
-                        break
-                    t += 1
-                if hit is None:
-                    exit_price = close[min(i + 1 + t, len(close) - 1)]
+                else:
                     profit = (entry_price - exit_price - spread) * lot * leverage
-                    balance += profit
-                    hit = profit > 0
-
+                balance += profit
+                hit = profit > 0
+            else:
+                # TP/SL未到達の場合は最終足で決済
+                exit_price = close.iloc[-1]
+                if sig == "CALL":
+                    profit = (exit_price - entry_price - spread) * lot * leverage
+                else:
+                    profit = (entry_price - exit_price - spread) * lot * leverage
+                balance += profit
+                hit = profit > 0
             entries.append(i)
             results.append(hit)
             balance_curve.append(balance)
@@ -654,7 +609,31 @@ def add_log_transformed_features(df):
     return df_log_transformed
 def make_train_data(folder_path, n_features=20):
     file_path = folder_path + ".csv"
-    df = pd.read_csv(file_path)
+    folder_path = './'  # フォルダのパスを指定
+
+    # データを格納するリスト
+    dataframes = []
+
+    # フォルダ内のCSVファイルを読み込む
+    for filename in os.listdir(folder_path):
+        if filename.endswith(file_path):
+            file_path = os.path.join(folder_path, filename)
+            # ファイルを読み込む
+            df = pd.read_csv(file_path, 
+                            header=None,  # ヘッダーなしの場合
+                            names=["date", "time", "open", "high", "low", "close", "volumeto"])  # カラム名を指定
+            # 日付と時間を結合してdatetime型に変換
+            df['close_time'] = pd.to_datetime(df['date'] + ' ' + df['time'], format='%Y.%m.%d %H:%M')
+            # 必要ない列（dateとtime）を削除
+            df = df.drop(columns=["date", "time"])
+            # リストに追加
+            dataframes.append(df)
+        print(filename)
+
+    # 複数のデータフレームを1つに結合
+
+    price_data = pd.concat(dataframes, ignore_index=True)
+    df = price_data.copy()
     X = df.apply(pd.to_numeric, errors='coerce')
     X.replace([np.inf, -np.inf], np.nan, inplace=True)
     X = X.loc[:, X.isnull().mean() < 0.9]
@@ -668,9 +647,8 @@ def make_train_data(folder_path, n_features=20):
     X = X.fillna(method='ffill').fillna(method='ffill')
     # --- 特徴量選択 ---
     features = ['atr', 'close', 'open', 'high', 'low',
-        'ADX','SMA_5', 'SMA_20','PLUS_DI', 'MINUS_DI'
+        'ADX','SMA_5', 'SMA_20','SMA_100','PLUS_DI', 'MINUS_DI'
     ]
-    X = X.drop(['return_1min'], axis=1)
     drop_keywords = ['trend_direction', 'trend_duration', 'trend_duration_bucket', 'trend_confidence','return_1min']
     drop_cols = [col for col in price_data.columns if any(key in col for key in drop_keywords)]
     X = price_data.drop(columns=drop_cols, errors='ignore')
@@ -767,11 +745,9 @@ print('finish make_features')
 print('finish make_labels')
 df['rsi'] = calc_rsi(df['close'], window=14)
 X = df.dropna()
-
-features = [
-    'atr', 'close', 'open', 'high', 'low',
-    'ADX','SMA_5', 'SMA_20','PLUS_DI', 'MINUS_DI'
-]
+features = ['atr', 'close', 'open', 'high', 'low',
+        'ADX','SMA_5', 'SMA_20','SMA_100','PLUS_DI', 'MINUS_DI'
+    ]
 features = select
 X = X[features]
 def get_pips_scale(symbol):
@@ -786,9 +762,9 @@ def get_pips_scale(symbol):
 pips = get_pips_scale(TO_SYMBOL)
 
 # --- 勝率計算ロジック追加 ---
-calc_winrate_technical(X_test, open_test, close_test, high_test, low_test)
+# calc_winrate_technical(X_test, open_test, close_test, high_test, low_test)
 calc_winrate_technical2(X_test, open_test, close_test, high_test, low_test)
-calc_winrate_technical(df, df['open'], df['close'], df['high'], df['low'])
+# calc_winrate_technical(df, df['open'], df['close'], df['high'], df['low'])
 calc_winrate_technical2(df, df['open'], df['close'], df['high'], df['low'])
 
 def run_realtime_signals(SYMBOL, TO_SYMBOL, interval_minutes=1, n_features=20,tp_pips=6, sl_pips=3, spread=0.02, bet_ratio=0.01, min_bet=1000, start_balance=50000):

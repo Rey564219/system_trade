@@ -478,6 +478,7 @@ def generate_technical_signal(df, adx_period=14, sma_short=5, sma_mid=20, adx_th
         # シグナル生成（条件を緩和）
         for i in range(100, len(df)):  # 最初の100行はスキップ
             try:
+                trigger = is_entry_trigger(df.iloc[:i+1])
                 # 基本的な条件
                 adx_now = adx[i] if not np.isnan(adx[i]) else 25.0
                 sma_order_up = sma_s[i] > sma_m[i]
@@ -487,16 +488,16 @@ def generate_technical_signal(df, adx_period=14, sma_short=5, sma_mid=20, adx_th
                 close_above_sma_long = close[i] > sma_l[i]
                 close_below_sma_long = close[i] < sma_l[i]
                 
-                # ADXがある程度の値を持つ場合のみ判定
-                if adx_now > adx_threshold:
-                    if sma_order_up and close_above_sma_long:
-                        signals.append("CALL")
-                    elif sma_order_down and close_below_sma_long:
-                        signals.append("PUT")
-                    else:
-                        signals.append("HOLD")
+                # # ADXがある程度の値を持つ場合のみ判定
+                # if adx_now > adx_threshold:
+                if sma_order_up and close_above_sma_long and trigger:
+                    signals.append("CALL")
+                elif sma_order_down and close_below_sma_long and trigger:
+                    signals.append("PUT")
                 else:
                     signals.append("HOLD")
+                # else:
+                #     signals.append("HOLD")
                     
             except Exception as e:
                 signals.append("HOLD")

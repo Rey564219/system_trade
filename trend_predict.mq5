@@ -11,93 +11,70 @@ input int atrPeriod      = 14;
 input double rrRatio     = 1.8; // 1.5〜2倍の中間
 input double leverage    = 3.0;
 
+
+input double riskPercent = 1.0;   // リスク1%
+input ulong magicNumber  = 123456;
+
 double lots;
 
 int OnInit()
 {
    return INIT_SUCCEEDED;
 }
+
 void OnTick()
 {
-    // 既にポジションがあればエントリーしない
-    if (PositionSelect(Symbol())) return;
+    if (PositionSelect(Symbol())) return; // ポジション保有中はスキップ
 
-    // 必要なローソク足データの取得
-    MqlRates price[];
-    ArraySetAsSeries(price, true);
-    if (CopyRates(Symbol(), PERIOD_CURRENT, 0, 60, price) < 60) return;
+    MqlRates m5[], m15[];
+    ArraySetAsSeries(m5, true);
+    ArraySetAsSeries(m15, true);
 
-    // 各種インジケーター
-    double smaShort[], smaMid[], smaLong[], upperBB[], lowerBB[], atr[];
-    if (!iMA(Symbol(), PERIOD_CURRENT, smaShortPeriod, 0, MODE_SMA, PRICE_CLOSE).CopyBuffer(0, 0, 3, smaShort)) return;
-    if (!iMA(Symbol(), PERIOD_CURRENT, smaMidPeriod,   0, MODE_SMA, PRICE_CLOSE).CopyBuffer(0, 0, 3, smaMid)) return;
-    if (!iMA(Symbol(), PERIOD_CURRENT, smaLongPeriod,  0, MODE_SMA, PRICE_CLOSE).CopyBuffer(0, 0, 3, smaLong)) return;
+    if (CopyRates(Symbol(), PERIOD_M5, 0, 60, m5) < 3) return;
+    if (CopyRates(Symbol(), PERIOD_M15, 0, 60, m15) < 3) return;
 
-    if (!iBands(Symbol(), PERIOD_CURRENT, bbPeriod, 0, bbDeviation, PRICE_CLOSE).CopyBuffer(1, 0, 3, upperBB)) return;
-    if (!iBands(Symbol(), PERIOD_CURRENT, bbPeriod, 0, bbDeviation, PRICE_CLOSE).CopyBuffer(2, 0, 3, lowerBB)) return;
+    // === 15分足でトレンド判定 ===
+    double smaS_m15[], smaM_m15[], smaL_m15[];
+    if (!CopyBuffer(iMA(Symbol(), PERIOD_M15, smaShortPeriod, 0, MODE_SMA, PRICE_CLOSE), 0, 0, 3, smaS_m15)) return;
+    if (!CopyBuffer(iMA(Symbol(), PERIOD_M15, smaMidPeriod,   0, MODE_SMA, PRICE_CLOSE), 0, 0, 3, smaM_m15)) return;
+    if (!CopyBuffer(iMA(Symbol(), PERIOD_M15, smaLongPeriod,  0, MODE_SMA, PRICE_CLOSE), 0, 0, 3, smaL_m15)) return;
 
-    if (!iATR(Symbol(), PERIOD_CURRENT, atrPeriod).CopyBuffer(0, 1, 1, atr)) return;
+    bool upTrend   = smaS_m15[1] > smaM_m15[1] && smaM_m15[1] > smaL_m15[1];
+    bool downTrend = smaS_m15[1] < smaM_m15[1] && smaM_m15[1] < smaL_m15[1];
 
-    double atr_value = atr[0];
+    // === 5分足でトリガー条件 ===
+    double smaS_m5[], smaM_m5[];
+    if (!CopyBuffer(iMA(Symbol(), PERIOD_M5, smaShortPeriod, 0, MODE_SMA, PRICE_CLOSE), 0, 0, 3, smaS_m5)) return;
+    if (!CopyBuffer(iMA(Symbol(), PERIOD_M5, smaMidPeriod,   0, MODE_SMA, PRICE_CLOSE), 0, 0, 3, smaM_m5)) return;
 
-    // ローソク足判定（陽線2本 or 陰線2本）
-    bool bullishCandle = price[2].close > price[2].open && price[1].close > price[1].open;
-    bool bearishCandle = price[2].close < price[2].open && price[1].close < price[1].open;
+    double bbUpper[], bbLower[];
+    if (!CopyBuffer(iBands(Symbol(), PERIOD_M5, bbPeriod, 0, bbDeviation, PRICE_CLOSE), 1, 0, 3, bbUpper)) return;
+    if (!CopyBuffer(iBands(Symbol(), PERIOD_M5, bbPeriod, 0, bbDeviation, PRICE_CLOSE), 2, 0, 3, bbLower)) return;
 
-    // BBタッチ
-    bool bbUpperTouch = price[1].high >= upperBB[1];
-    bool bbLowerTouch = price[1].low  <= lowerBB[1];
+    double atr[];
+    if (!CopyBuffer(iATR(Symbol(), PERIOD_M5, atrPeriod), 0, 1, 1, atr)) return;
+    double atrValue = atr[0];
 
-    // SMAクロス
-    bool goldenCross = smaShort[2] < smaMid[2] && smaShort[1] > smaMid[1];
-    bool deadCross   = smaShort[2] > smaMid[2] && smaShort[1] < smaMid[1];
+    bool bullish2 = m5[2].close > m5[2].open && m5[1].close > m5[1].open;
+    bool bearish2 = m5[2].close < m5[2].open && m5[1].close < m5[1].open;
 
-    // トレンド判定
-    bool upTrend   = smaShort[1] > smaMid[1] && smaMid[1] > smaLong[1];
-    bool downTrend = smaShort[1] < smaMid[1] && smaMid[1] < smaLong[1];
+    bool bbUpperTouch = m5[1].high >= bbUpper[1];
+    bool bbLowerTouch = m5[1].low  <= bbLower[1];
 
-    // TP/SLはATRに基づく
-    double sl_pips = atr_value;
-    double tp_pips = atr_value * rrRatio;
+    bool goldenCross = smaS_m5[2] < smaM_m5[2] && smaS_m5[1] > smaM_m5[1];
+    bool deadCross   = smaS_m5[2] > smaM_m5[2] && smaS_m5[1] < smaM_m5[1];
 
-    // ロット計算（ATRに基づく）
-    double lots = CalculateLotsByATR(atr_value);
+    double slPips = atrValue;
+    double tpPips = atrValue * rrRatio;
+    double lots   = CalculateLotsByATR(atrValue);
 
-    // === 買いエントリー（OR条件） ===
-    if (upTrend && (bullishCandle || bbUpperTouch || goldenCross))
-    {
-        EnterTrade(ORDER_TYPE_BUY, sl_pips, tp_pips, lots);
-    }
+    // === 買い条件 ===
+    if (upTrend && (bullish2 || bbUpperTouch || goldenCross))
+        EnterTrade(ORDER_TYPE_BUY, slPips, tpPips, lots);
 
-    // === 売りエントリー（OR条件） ===
-    if (downTrend && (bearishCandle || bbLowerTouch || deadCross))
-    {
-        EnterTrade(ORDER_TYPE_SELL, sl_pips, tp_pips, lots);
-    }
-}
-
-double CalculateLotsByATR(double atr_value)
-{
-    double balance      = AccountInfoDouble(ACCOUNT_BALANCE);
-    double riskPercent  = 1.0;  // 資金の1%をリスク
-    double riskAmount   = balance * riskPercent / 100.0;
-
-    double tickValue    = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-    double tickSize     = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-
-    double sl_value     = atr_value / tickSize * tickValue;
-
-    double lots = riskAmount / sl_value;
-
-    // ロット制限（ブローカー仕様）
-    double minLot   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-    double maxLot   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-    double lotStep  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-
-    lots = MathMax(minLot, MathMin(lots, maxLot));
-    lots = NormalizeDouble(lots / lotStep, 0) * lotStep;
-
-    return lots;
+    // === 売り条件 ===
+    if (downTrend && (bearish2 || bbLowerTouch || deadCross))
+        EnterTrade(ORDER_TYPE_SELL, slPips, tpPips, lots);
 }
 
 // 注文発注
@@ -127,11 +104,24 @@ void EnterTrade(int type, double sl_pips, double tp_pips)
 // ロット数算出（レバレッジ計算含む）
 double CalculateLots(double sl_pips)
 {
-   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
-   double riskPercent = 1.0; // 資金の1%
-   double riskAmount = balance * riskPercent / 100.0;
-   double lotSize = (riskAmount * leverage) / (sl_pips * SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE));
-   lotSize = MathMin(lotSize, SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX));
-   lotSize = NormalizeDouble(lotSize, 2);
-   return lotSize;
+    double balance        = AccountInfoDouble(ACCOUNT_BALANCE);
+    double riskPercent    = 1.0;  // リスク割合 (%)
+    double riskAmount     = balance * riskPercent / 100.0;
+
+    double tickValue      = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+    double lotStep        = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+    double minLot         = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+    double maxLot         = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+
+    // リスクに基づいた理論ロット数
+    double rawLot         = (riskAmount * leverage) / (sl_pips * tickValue);
+
+    // 最小ロットを保証
+    double finalLot       = MathMax(minLot, MathMin(rawLot, maxLot));
+
+    // ロットの刻みに合わせて丸める
+    finalLot = NormalizeDouble(finalLot / lotStep, 0) * lotStep;
+
+    return finalLot;
 }
+

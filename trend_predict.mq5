@@ -64,42 +64,61 @@ void OnTick()
     bool goldenCross = smaS_m5[2] < smaM_m5[2] && smaS_m5[1] > smaM_m5[1];
     bool deadCross   = smaS_m5[2] > smaM_m5[2] && smaS_m5[1] < smaM_m5[1];
 
-    double slPips = atrValue;
-    double tpPips = atrValue * rrRatio;
-    double lots   = CalculateLotsByATR(atrValue);
+    double slPips = atrValue * 2;
+    double tpPips = atrValue * 2 * rrRatio;
+    double lots   = CalculateLots(slPips);
 
     // === 買い条件 ===
     if (upTrend && (bullish2 || bbUpperTouch || goldenCross))
-        EnterTrade(ORDER_TYPE_BUY, slPips, tpPips, lots);
+        EnterTrade(ORDER_TYPE_BUY, slPips, tpPips);
 
     // === 売り条件 ===
     if (downTrend && (bearish2 || bbLowerTouch || deadCross))
-        EnterTrade(ORDER_TYPE_SELL, slPips, tpPips, lots);
+        EnterTrade(ORDER_TYPE_SELL, slPips, tpPips);
 }
 
 // 注文発注
 void EnterTrade(int type, double sl_pips, double tp_pips)
 {
+   double lot = 0.1;  // 固定ロットまたは外部で計算して渡す
    double price = (type == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) :
-                                              SymbolInfoDouble(_Symbol, SYMBOL_BID);
+                                             SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double sl = (type == ORDER_TYPE_BUY) ? price - sl_pips * point : price + sl_pips * point;
+   double tp = (type == ORDER_TYPE_BUY) ? price + tp_pips * point : price - tp_pips * point;
+   double deviation = 10;  // 許容スリッページ（ポイント）
 
-   double sl = (type == ORDER_TYPE_BUY) ? price - sl_pips : price + sl_pips;
-   double tp = (type == ORDER_TYPE_BUY) ? price + tp_pips : price - tp_pips;
+   MqlTradeRequest request;
+   MqlTradeResult result;
+   ZeroMemory(request);
+   ZeroMemory(result);
 
-   MqlTradeRequest request = {};
-   MqlTradeResult result = {};
-   request.action   = TRADE_ACTION_DEAL;
-   request.symbol   = _Symbol;
-   request.volume   = lots;
-   request.type     = type;
-   request.price    = price;
-   request.sl       = sl;
-   request.tp       = tp;
-   request.deviation = 10;
-   request.magic    = 123456;
+   request.action = TRADE_ACTION_DEAL;
+   request.symbol = _Symbol;
+   request.volume = lot;
+   request.type = type;
+   request.price = price;
+   request.sl = NormalizeDouble(sl, _Digits);
+   request.tp = NormalizeDouble(tp, _Digits);
+   request.deviation = deviation;
+   request.magic = 123456;
+   request.type_filling = ORDER_FILLING_IOC;  // 成行注文
+   request.comment = "EnterTrade";
 
-   OrderSend(request, result);
+   if(!OrderSend(request, result))
+   {
+      Print("注文送信失敗。エラー: ", GetLastError());
+   }
+   else
+   {
+      if(result.retcode == TRADE_RETCODE_DONE)
+         Print("注文成功: チケット#", result.order);
+      else
+         Print("注文エラー: ", result.retcode);
+   }
 }
+
+
 
 // ロット数算出（レバレッジ計算含む）
 double CalculateLots(double sl_pips)

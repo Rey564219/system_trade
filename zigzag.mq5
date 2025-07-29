@@ -3,7 +3,7 @@
 
 input double RiskReward = 1.8;       // TP/SL比率
 input double RiskPercent = 1.0;      // 資金に対するリスク%
-input double leverage = 3.0;       // 証拠金レバレッジ（ブローカーに合わせて変更）
+input double leverage = 3.0;         // 証拠金レバレッジ
 input int ZigZagDepth = 12;
 input int ZigZagDeviation = 5;
 input int ZigZagBackstep = 3;
@@ -11,6 +11,8 @@ input int magicNumber = 1325325;
 
 int zz_handle_15m, zz_handle_5m;
 double zz_15m[], zz_5m[];
+
+CTrade trade;
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
@@ -28,9 +30,9 @@ int OnInit()
 void OnTick()
 {
    if(!CopyBuffer(zz_handle_15m, 0, 0, 100, zz_15m)) return;
-   if(!CopyBuffer(zz_handle_5m,  0, 0, 100, zz_5m))  return;
+   if(!CopyBuffer(zz_handle_5m, 0, 0, 10, zz_5m)) return;
 
-   //--- トレンド判定（15分足ZigZag）
+   //--- トレンド判定（15分足ZigZag：最新2つのピークから方向を推定）
    int peak15 = -1, valley15 = -1;
    for(int i = 1; i < 100; i++)
    {
@@ -49,58 +51,56 @@ void OnTick()
 
    bool isUptrend = valley15 > peak15;
 
-   //--- エントリーチャンス検出（5分足 ZigZag）
-   int lastZZIndex = -1;
-   double lastZZVal = 0;
-   for(int i = 1; i < 100; i++)
+   //--- 最新のZigZag点を1つだけ探す（5分足）
+   int zzIndex = -1;
+   double zzValue = 0;
+   for(int i = 1; i < 10; i++)  // 1本目から（現在足は未確定なので無視）
    {
-      if(zz_5m[i] != 0)
+      if(zz_5m[i] != 0.0)
       {
-         lastZZIndex = i;
-         lastZZVal = zz_5m[i];
+         zzIndex = i;
+         zzValue = zz_5m[i];
          break;
       }
    }
-   if(lastZZIndex == -1) return;
+   if(zzIndex != 1) return;  // ZigZag点は確定した「1本前の足」でなければ無視
 
-   double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-
-   // ポジションがなければのみエントリー
+   //--- すでにポジションがある場合は何もしない
    if(PositionSelect(_Symbol)) return;
 
+   double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double sl_pips, tp_pips;
 
-   //--- Buy条件（押し目買い）
-   if(isUptrend && price > lastZZVal)
+   //--- 買い：上昇トレンドかつ価格がZigZag点を上回った
+   if(isUptrend && price > zzValue)
    {
-      sl_pips = price - lastZZVal;
+      sl_pips = price - zzValue;
       tp_pips = sl_pips * RiskReward;
       double lots = CalculateLots(sl_pips / _Point);
-      EnterTrade(ORDER_TYPE_BUY, sl_pips, tp_pips);
+      EnterTrade(ORDER_TYPE_BUY, sl_pips, tp_pips, lots);
    }
 
-   //--- Sell条件（戻り売り）
-   if(!isUptrend && price < lastZZVal)
+   //--- 売り：下降トレンドかつ価格がZigZag点を下回った
+   if(!isUptrend && price < zzValue)
    {
-      sl_pips = lastZZVal - price;
+      sl_pips = zzValue - price;
       tp_pips = sl_pips * RiskReward;
       double lots = CalculateLots(sl_pips / _Point);
-      EnterTrade(ORDER_TYPE_SELL, sl_pips, tp_pips);
+      EnterTrade(ORDER_TYPE_SELL, sl_pips, tp_pips, lots);
    }
 }
 
 //+------------------------------------------------------------------+
-//| 注文発注関数（ユーザー提供）                                    |
+//| 注文発注関数                                                     |
 //+------------------------------------------------------------------+
-void EnterTrade(int type, double sl_pips, double tp_pips)
+void EnterTrade(int type, double sl_pips, double tp_pips, double lot)
 {
-   double lot = 0.1;  // 固定ロットまたは外部で計算して渡す
    double price = (type == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) :
                                              SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    double sl = (type == ORDER_TYPE_BUY) ? price - sl_pips * point : price + sl_pips * point;
    double tp = (type == ORDER_TYPE_BUY) ? price + tp_pips * point : price - tp_pips * point;
-   double deviation = 10;  // 許容スリッページ（ポイント）
+   double deviation = 10;
 
    MqlTradeRequest request;
    MqlTradeResult result;
@@ -115,9 +115,9 @@ void EnterTrade(int type, double sl_pips, double tp_pips)
    request.sl = NormalizeDouble(sl, _Digits);
    request.tp = NormalizeDouble(tp, _Digits);
    request.deviation = deviation;
-   request.magic = 123456;
-   request.type_filling = ORDER_FILLING_IOC;  // 成行注文
-   request.comment = "EnterTrade";
+   request.magic = magicNumber;
+   request.type_filling = ORDER_FILLING_IOC;
+   request.comment = "ZigZag Entry";
 
    if(!OrderSend(request, result))
    {
@@ -132,9 +132,8 @@ void EnterTrade(int type, double sl_pips, double tp_pips)
    }
 }
 
-
 //+------------------------------------------------------------------+
-//| ロット計算（ユーザー提供＋修正）                                 |
+//| ロット計算                                                       |
 //+------------------------------------------------------------------+
 double CalculateLots(double sl_pips)
 {
@@ -145,13 +144,8 @@ double CalculateLots(double sl_pips)
     double minLot      = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
     double maxLot      = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
 
-    // ロット計算（tickValueは1ロットあたり）
     double rawLot = (riskAmount * leverage) / (sl_pips * tickValue);
-
-    // ロット制限内に収める
     double finalLot = MathMax(minLot, MathMin(rawLot, maxLot));
-
-    // ロット刻みに丸める
     finalLot = NormalizeDouble(finalLot / lotStep, 0) * lotStep;
     return finalLot;
 }

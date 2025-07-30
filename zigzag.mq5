@@ -71,12 +71,12 @@ void OnTick()
    if(high1_5m == -1 || high2_5m == -1 || low1_5m == -1 || low2_5m == -1) return;
 
    // ZigZagトレンド判定
-   bool isUptrendZZ_5m = (low1_5m > low2_5m) && (high1_5m > high2_5m);
-   bool isDowntrendZZ_5m = (low1_5m < low2_5m) && (high1_5m < high2_5m);
+   bool isUptrendZZ_5m = (low1_5m > low2_5m) ;
+   bool isDowntrendZZ_5m = (high1_5m < high2_5m);
 
    // EMA傾き判定
    double ma_now_5m = ma_buf_5m[0];
-   double ma_past_5m = ma_buf_5m[10];
+   double ma_past_5m = ma_buf_5m[5];
 
    if(ma_now_5m == 0 || ma_past_5m == 0) return;
 
@@ -86,8 +86,8 @@ void OnTick()
    // 両方の時間足でトレンド方向が一致しているか
    bool isUptrend = isUptrendZZ_5m && ema_up_5m;
    bool isDowntrend = isDowntrendZZ_5m && ema_down_5m;
-   bool isUptrendexit = isUptrendZZ_5m;
-   bool isDowntrendexit = isDowntrendZZ_5m;
+   bool isUptrendexit = ema_up_5m;
+   bool isDowntrendexit = ema_down_5m;
 
    double price_ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double price_bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);

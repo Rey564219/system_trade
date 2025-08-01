@@ -1,138 +1,218 @@
-input ENUM_TIMEFRAMES TimeFrame = PERIOD_M5;
-input int MaPeriod = 36;
-input int nCounter = 3;
-input double leverage = 3.0;
+#property strict
+#include <Trade\Trade.mqh>
 
-int trendDir = 0;
-int reverseCount = 0;
-bool isEntryReady = false;
-double slPips = 0, tpPips = 0;
-datetime lastTradeTime = 0;
-input int atrPeriod      = 14;
-input double rrRatio     = 1.8;
-int magicNumber = 1954305;
-int maHandle;
-double maBuffer[];
+input double RiskPercent   = 1.0;
+input double leverage      = 10.0;
+input int    ZigZagDepth   = 12;
+input int    ZigZagDeviation = 5;
+input int    ZigZagBackstep = 3;
+input int    ma_period     = 20;
+input int    atr_period    = 14;
+input double atr_threshold = 0.0002;  // ATRがこれ未満ならエントリーしない
+input int    magicNumber   = 1325325;
+input double sl_margin     = 10;
+input int MaxConsecutiveLosses = 3;
+input int LossCheckPeriod = 100;
+input double MaxDrawdownUSD = 200.0; // 最大許容損失（USD）
+input double MinBodyRatio = 0.3; // ローソク足実体長 / ATR（30%以上）
 
-//-------------------------------------------
+CTrade trade;
+
+int zz_handle_5m;
+int ma_handle_5m;
+int atr_handle_5m;
+
+double zz_buf_5m[];
+double ma_buf_5m[];
+double atr_buf_5m[];
+
 int OnInit()
 {
-   maHandle = iMA(_Symbol, TimeFrame, MaPeriod, 0, MODE_SMA, PRICE_CLOSE);
-   if (maHandle == INVALID_HANDLE)
+   zz_handle_5m = iCustom(_Symbol, PERIOD_M5, "Examples\\ZigZag", ZigZagDepth, ZigZagDeviation, ZigZagBackstep);
+   ma_handle_5m = iMA(_Symbol, PERIOD_M5, ma_period, 0, MODE_EMA, PRICE_CLOSE);
+   atr_handle_5m = iATR(_Symbol, PERIOD_M5, atr_period);
+
+   if(zz_handle_5m == INVALID_HANDLE || ma_handle_5m == INVALID_HANDLE || atr_handle_5m == INVALID_HANDLE)
    {
-      Print("MAハンドル作成失敗");
+      Print("インジケーター初期化失敗");
       return INIT_FAILED;
    }
+
+   ArraySetAsSeries(zz_buf_5m, true);
+   ArraySetAsSeries(ma_buf_5m, true);
+   ArraySetAsSeries(atr_buf_5m, true);
+
    return INIT_SUCCEEDED;
 }
 
-//-------------------------------------------
 void OnTick()
 {
-   if(!IsNewBar(TimeFrame)) return;
-
-   int dir = DetectTrend();
-   if(dir == 0) return;
-
-   double haOpen, haClose, haHigh, haLow;
-   GetHeikinAshi(1, haOpen, haClose, haHigh, haLow);
-
-   bool haReversal = (dir == 1 && haClose < haOpen) || (dir == -1 && haClose > haOpen);
-
-   if(dir != trendDir) {
-      trendDir = dir;
-      reverseCount = 0;
-      isEntryReady = false;
+   if(IsTooMuchLoss())
+   {
+      Print("連敗中のためエントリーを見送り");
+      return;
    }
+   if(!CopyBuffer(zz_handle_5m, 0, 0, 100, zz_buf_5m)) return;
+   if(!CopyBuffer(ma_handle_5m, 0, 0, 11, ma_buf_5m)) return;
+   if(!CopyBuffer(atr_handle_5m, 0, 0, 2, atr_buf_5m)) return;
 
-   if(haReversal)
-      reverseCount++;
-   else {
-      if(reverseCount >= nCounter) {
-         isEntryReady = true;
-         double shadow = (dir == 1) ? (haLow - haOpen) : (haHigh - haOpen);
-         slPips = NormalizeDouble(MathAbs(shadow), _Digits);
-         tpPips = NormalizeDouble(slPips * 1.5, _Digits);
+   double atr = atr_buf_5m[0];
+   if(atr == 0 || atr < atr_threshold)
+      return; // ATRが閾値未満 → エントリー見送り
+
+   double high1, low1, high2, low2;
+   if(!GetZigZagHighLow(zz_buf_5m, high1, low1, high2, low2)) return;
+
+   double ma_now = ma_buf_5m[0];
+   double ma_past = ma_buf_5m[5];
+   if(ma_now == 0 || ma_past == 0) return;
+
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   bool ma_up = ma_now > ma_past;
+   bool ma_down = ma_now < ma_past;
+
+   double zz_now = zz_buf_5m[1];
+   if(zz_now == 0.0) return;
+
+
+   // エントリー判定
+   if(!PositionSelect(_Symbol)) {
+      double high, low;
+      if(ShouldBuy(zz_buf_5m, high, low) && ma_up && ask > high && (ask - high) > 0.3 * atr)
+      {
+         if(!IsLastCandleBullish() || !IsLastCandleStrong(atr)) return;
+
+         double sl = low - sl_margin * _Point;
+         double lots = CalculateLots((ask - sl) / _Point);
+         EnterTrade(ORDER_TYPE_BUY, sl, 0, lots);
       }
-      reverseCount = 0;
+      else if(ShouldSell(zz_buf_5m, high, low) && ma_down && bid < low && (low - bid) > 0.3 * atr)
+      {
+         if(!IsLastCandleBullish() || !IsLastCandleStrong(atr)) return;
+
+         double sl = high + sl_margin * _Point;
+         double lots = CalculateLots((sl - bid) / _Point);
+         EnterTrade(ORDER_TYPE_SELL, sl, 0, lots);
+      }
    }
-
-   if(isEntryReady && TimeCurrent() - lastTradeTime > 60) {
-      double lots = CalculateLots(slPips);
-      EnterTrade((dir == 1) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL, slPips, tpPips);
-      lastTradeTime = TimeCurrent();
-      isEntryReady = false;
-   }
-}
-
-//-------------------------------------------
-void GetHeikinAshi(int index, double &haOpen, double &haClose, double &haHigh, double &haLow)
-{
-   double prevHaOpen, prevHaClose;
-   if(index+1 < Bars(_Symbol, TimeFrame)) {
-      GetHeikinAshi(index+1, prevHaOpen, prevHaClose, haHigh, haLow);
-   } else {
-      prevHaOpen = iOpen(_Symbol, TimeFrame, index+1);
-      prevHaClose = iClose(_Symbol, TimeFrame, index+1);
-   }
-
-   double open  = iOpen(_Symbol, TimeFrame, index);
-   double close = iClose(_Symbol, TimeFrame, index);
-   double high  = iHigh(_Symbol, TimeFrame, index);
-   double low   = iLow(_Symbol, TimeFrame, index);
-
-   haClose = (open + high + low + close) / 4.0;
-   haOpen  = (prevHaOpen + prevHaClose) / 2.0;
-   haHigh  = MathMax(high, MathMax(haOpen, haClose));
-   haLow   = MathMin(low, MathMin(haOpen, haClose));
-}
-
-//-------------------------------------------
-int DetectTrend()
-{
-   if(CopyBuffer(maHandle, 0, 1, 2, maBuffer) != 2)
-   {
-      Print("MA取得失敗");
-      return 0;
-   }
-
-   double ma1 = maBuffer[0];
-   double ma2 = maBuffer[1];
-
-   double haClose, haOpen, haHigh, haLow;
-   GetHeikinAshi(1, haOpen, haClose, haHigh, haLow);
-
-   if(ma1 > ma2 && haClose > ma1)
-      return 1;
-   else if(ma1 < ma2 && haClose < ma1)
-      return -1;
    else
-      return 0;
+   {
+      ulong ticket = PositionGetTicket(0);
+      int type = (int)PositionGetInteger(POSITION_TYPE);
+   
+      // ローソク足の反転＋EMA崩れのどちらかで決済
+      if(type == POSITION_TYPE_BUY && !ma_up )
+      {
+         trade.PositionClose(ticket);
+         Print("BUY利確: EMA崩れ or 陰線反転");
+      }
+      else if(type == POSITION_TYPE_SELL && !ma_down)
+      {
+         trade.PositionClose(ticket);
+         Print("SELL利確: EMA崩れ or 陽線反転");
+      }
+   }
+
 }
 
-//-------------------------------------------
-datetime lastBarTime = 0;
-bool IsNewBar(ENUM_TIMEFRAMES tf)
+bool GetZigZagHighLow(const double &zz_buf[], double &high1, double &low1, double &high2, double &low2)
 {
-   datetime currentBarTime = iTime(_Symbol, tf, 0);
-   if(currentBarTime != lastBarTime)
+   int found_high = 0, found_low = 0;
+   high1 = high2 = low1 = low2 = -1;
+
+   for(int i = 1; i < 100; i++)
    {
-      lastBarTime = currentBarTime;
-      return true;
+      double val = zz_buf[i];
+      if(val == 0.0) continue;
+
+      double price = iClose(_Symbol, PERIOD_M5, i);
+
+      if(val > price)
+      {
+         if(found_high == 0) { high1 = val; found_high++; }
+         else if(found_high == 1) { high2 = val; found_high++; }
+      }
+      else
+      {
+         if(found_low == 0) { low1 = val; found_low++; }
+         else if(found_low == 1) { low2 = val; found_low++; }
+      }
+
+      if(found_high >= 2 && found_low >= 2)
+         return true;
    }
+
    return false;
 }
 
-//-------------------------------------------
-void EnterTrade(int type, double sl_pips, double tp_pips)
+bool ShouldBuy(const double &zz_buf[], double &lastHigh, double &lastLow)
 {
-   double lot = 0.1;  // 固定ロットまたは外部で計算して渡す
-   double price = (type == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) :
-                                             SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   double sl = (type == ORDER_TYPE_BUY) ? price - sl_pips * point : price + sl_pips * point;
-   double tp = (type == ORDER_TYPE_BUY) ? price + tp_pips * point : price - tp_pips * point;
-   double deviation = 10;  // 許容スリッページ（ポイント）
+   int count = 0;
+   lastHigh = 0;
+   lastLow = 0;
+
+   for(int i = 1; i < 100 && count < 2; i++)
+   {
+      double val = zz_buf[i];
+      if(val == 0) continue;
+
+      double price = iClose(_Symbol, PERIOD_M5, i);
+      if(val < price && count == 0) {
+         lastLow = val; count++;
+      }
+      else if(val > price && count == 1) {
+         lastHigh = val; count++;
+      }
+   }
+
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   return (count == 2 && ask > lastHigh);
+}
+
+bool ShouldSell(const double &zz_buf[], double &lastHigh, double &lastLow)
+{
+   int count = 0;
+   lastHigh = 0;
+   lastLow = 0;
+
+   for(int i = 1; i < 100 && count < 2; i++)
+   {
+      double val = zz_buf[i];
+      if(val == 0) continue;
+
+      double price = iClose(_Symbol, PERIOD_M5, i);
+      if(val > price && count == 0) {
+         lastHigh = val; count++;
+      }
+      else if(val < price && count == 1) {
+         lastLow = val; count++;
+      }
+   }
+
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   return (count == 2 && bid < lastLow);
+}
+
+bool IsLastCandleBullish()
+{
+   double open = iOpen(_Symbol, PERIOD_M5, 1);
+   double close = iClose(_Symbol, PERIOD_M5, 1);
+   return close > open;
+}
+
+bool IsLastCandleBearish()
+{
+   double open = iOpen(_Symbol, PERIOD_M5, 1);
+   double close = iClose(_Symbol, PERIOD_M5, 1);
+   return close < open;
+}
+
+void EnterTrade(int type, double sl, double tp, double lot)
+{
+   double price = (type == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
+                                           : SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
    MqlTradeRequest request;
    MqlTradeResult result;
@@ -145,41 +225,71 @@ void EnterTrade(int type, double sl_pips, double tp_pips)
    request.type = type;
    request.price = price;
    request.sl = NormalizeDouble(sl, _Digits);
-   request.tp = NormalizeDouble(tp, _Digits);
-   request.deviation = deviation;
-   request.magic = 123456;
-   request.type_filling = ORDER_FILLING_IOC;  // 成行注文
-   request.comment = "EnterTrade";
+   request.tp = (tp > 0) ? NormalizeDouble(tp, _Digits) : 0;
+   request.magic = magicNumber;
+   request.deviation = 10;
+   request.type_filling = ORDER_FILLING_IOC;
 
-   if(!OrderSend(request, result))
-   {
-      Print("注文送信失敗。エラー: ", GetLastError());
-   }
+   if(!OrderSend(request, result) || result.retcode != TRADE_RETCODE_DONE)
+      Print("注文失敗: ", result.retcode);
    else
-   {
-      if(result.retcode == TRADE_RETCODE_DONE)
-         Print("注文成功: チケット#", result.order);
-      else
-         Print("注文エラー: ", result.retcode);
-   }
+      Print("注文成功: ", result.order);
 }
 
 
-//-------------------------------------------
+bool IsTooMuchLoss()
+{
+   double total_loss = 0;
+
+   datetime from_time = TimeCurrent() - 60 * 60 * 24 * 10; // 過去n日間
+   datetime to_time = TimeCurrent();
+   HistorySelect(from_time, to_time);
+
+   int total = HistoryDealsTotal();
+
+   for(int i = total - 1; i >= 0; i--)
+   {
+      ulong ticket = HistoryDealGetTicket(i);
+      if(ticket == 0) continue;
+
+      double profit = HistoryDealGetDouble(ticket, DEAL_PROFIT);
+      int type = (int)HistoryDealGetInteger(ticket, DEAL_TYPE);
+
+      // BUY/SELLのみ対象
+      if(type != DEAL_TYPE_BUY && type != DEAL_TYPE_SELL) continue;
+
+      if(profit < 0)
+         total_loss += MathAbs(profit);
+   }
+
+   if(total_loss >= MaxDrawdownUSD)
+   {
+      Print("最大損失額を超えたためエントリーを停止中: ", total_loss, "円");
+      return true;
+   }
+   
+   return false;
+}
+bool IsLastCandleStrong(double atr)
+{
+   double open = iOpen(_Symbol, PERIOD_M5, 1);
+   double close = iClose(_Symbol, PERIOD_M5, 1);
+   double body = MathAbs(close - open);
+   return body >= (MinBodyRatio * atr);
+}
+
 double CalculateLots(double sl_pips)
 {
-   double balance     = AccountInfoDouble(ACCOUNT_BALANCE);
-   double riskPercent = 1.0;
-   double riskAmount  = balance * riskPercent / 100.0;
+   double balance    = AccountInfoDouble(ACCOUNT_BALANCE);
+   double riskAmount = balance * RiskPercent / 100.0;
+   double tickValue  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double lotStep    = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double minLot     = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double maxLot     = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
 
-   double tickValue   = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-   double lotStep     = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-   double minLot      = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-   double maxLot      = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-
-   double rawLot      = (riskAmount * leverage) / (sl_pips * tickValue);
-   double finalLot    = MathMax(minLot, MathMin(rawLot, maxLot));
-
+   double rawLot = (riskAmount * leverage) / (sl_pips * tickValue);
+   double finalLot = MathMax(minLot, MathMin(rawLot, maxLot));
    finalLot = NormalizeDouble(finalLot / lotStep, 0) * lotStep;
    return finalLot;
 }
+

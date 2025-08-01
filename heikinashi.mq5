@@ -1,5 +1,5 @@
 input ENUM_TIMEFRAMES TimeFrame = PERIOD_M5;
-input int MaPeriod = 20;
+input int MaPeriod = 36;
 input int nCounter = 3;
 input double leverage = 3.0;
 

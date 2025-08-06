@@ -1,7 +1,8 @@
 input ENUM_TIMEFRAMES TimeFrame = PERIOD_M5;
-input int MaPeriod = 36;
+input int MaPeriod = 40; // 40に変更
 input int nCounter = 3;
 input double leverage = 3.0;
+input double RiskPercent = 1.0; // リスクパーセントを追加
 
 int trendDir = 0;
 int reverseCount = 0;
@@ -9,7 +10,8 @@ bool isEntryReady = false;
 double slPips = 0, tpPips = 0;
 datetime lastTradeTime = 0;
 input int atrPeriod      = 14;
-input double rrRatio     = 1.8;
+input double rrRatio     = 2.0; // 2:1に変更
+
 int magicNumber = 1954305;
 int maHandle;
 double maBuffer[];
@@ -25,6 +27,11 @@ int OnInit()
    }
    return INIT_SUCCEEDED;
 }
+// ...existing code...
+
+// 反転期間中の最安値・最高値を記録する変数を追加
+double reversalMin = 0.0;
+double reversalMax = 0.0;
 
 //-------------------------------------------
 void OnTick()
@@ -37,24 +44,56 @@ void OnTick()
    double haOpen, haClose, haHigh, haLow;
    GetHeikinAshi(1, haOpen, haClose, haHigh, haLow);
 
+   // トレンドと反対の平均足かどうかを判断
    bool haReversal = (dir == 1 && haClose < haOpen) || (dir == -1 && haClose > haOpen);
 
    if(dir != trendDir) {
       trendDir = dir;
       reverseCount = 0;
       isEntryReady = false;
+      reversalMin = 0.0;
+      reversalMax = 0.0;
    }
 
-   if(haReversal)
+   if(haReversal) {
       reverseCount++;
-   else {
+      double low = iLow(_Symbol, TimeFrame, 1);
+      double high = iHigh(_Symbol, TimeFrame, 1);
+      if(reverseCount == 1) {
+         reversalMin = low;
+         reversalMax = high;
+      } else {
+         if(low < reversalMin) reversalMin = low;
+         if(high > reversalMax) reversalMax = high;
+      }
+   } else {
+      // 反対の平均足がnCounter回続いた後、元のトレンドと同じ平均足に反転した場合
       if(reverseCount >= nCounter) {
          isEntryReady = true;
-         double shadow = (dir == 1) ? (haLow - haOpen) : (haHigh - haOpen);
-         slPips = NormalizeDouble(MathAbs(shadow), _Digits);
-         tpPips = NormalizeDouble(slPips * 1.5, _Digits);
+
+         double currentPrice = (dir == 1) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : 
+                                            SymbolInfoDouble(_Symbol, SYMBOL_BID);
+         double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+         int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+
+         // 5桁ブローカー対応
+         if(digits == 5 || digits == 3) point *= 10;
+
+         if(dir == 1) { // 買いエントリー
+            slPips = MathAbs(currentPrice - reversalMin) / point;
+         } else { // 売りエントリー
+            slPips = MathAbs(reversalMax - currentPrice) / point;
+         }
+
+         tpPips = slPips * rrRatio; // 2:1の比率
+
+         // デバッグ情報出力
+         Print("SL/TP Debug: reversalMin=", reversalMin, " reversalMax=", reversalMax, " currentPrice=", currentPrice);
+         Print("SL/TP Debug: point=", point, " digits=", digits, " slPips=", slPips, " tpPips=", tpPips);
       }
       reverseCount = 0;
+      reversalMin = 0.0;
+      reversalMax = 0.0;
    }
 
    if(isEntryReady && TimeCurrent() - lastTradeTime > 60) {
@@ -126,13 +165,22 @@ bool IsNewBar(ENUM_TIMEFRAMES tf)
 //-------------------------------------------
 void EnterTrade(int type, double sl_pips, double tp_pips)
 {
-   double lot = 0.1;  // 固定ロットまたは外部で計算して渡す
+   double lot = CalculateLots(sl_pips);
    double price = (type == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) :
                                              SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   
+   // 5桁ブローカー対応
+   if(digits == 5 || digits == 3) point *= 10;
+   
    double sl = (type == ORDER_TYPE_BUY) ? price - sl_pips * point : price + sl_pips * point;
    double tp = (type == ORDER_TYPE_BUY) ? price + tp_pips * point : price - tp_pips * point;
-   double deviation = 10;  // 許容スリッページ（ポイント）
+   double deviation = 10;
+   
+   // デバッグ情報を出力
+   Print("EnterTrade Debug: price=", price, " sl_pips=", sl_pips, " tp_pips=", tp_pips, " point=", point);
+   Print("EnterTrade Debug: sl=", sl, " tp=", tp, " type=", (type == ORDER_TYPE_BUY ? "BUY" : "SELL"));
 
    MqlTradeRequest request;
    MqlTradeResult result;
@@ -147,9 +195,9 @@ void EnterTrade(int type, double sl_pips, double tp_pips)
    request.sl = NormalizeDouble(sl, _Digits);
    request.tp = NormalizeDouble(tp, _Digits);
    request.deviation = deviation;
-   request.magic = 123456;
-   request.type_filling = ORDER_FILLING_IOC;  // 成行注文
-   request.comment = "EnterTrade";
+   request.magic = magicNumber; // magicNumberを使用
+   request.type_filling = ORDER_FILLING_IOC;
+   request.comment = "HeikinAshi Entry";
 
    if(!OrderSend(request, result))
    {
@@ -164,22 +212,32 @@ void EnterTrade(int type, double sl_pips, double tp_pips)
    }
 }
 
-
 //-------------------------------------------
 double CalculateLots(double sl_pips)
 {
-   double balance     = AccountInfoDouble(ACCOUNT_BALANCE);
-   double riskPercent = 1.0;
-   double riskAmount  = balance * riskPercent / 100.0;
+   double balance    = AccountInfoDouble(ACCOUNT_BALANCE);
+   double riskAmount = balance * RiskPercent / 100.0;
+   double tickValue  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double lotStep    = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double minLot     = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double maxLot     = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
 
-   double tickValue   = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-   double lotStep     = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-   double minLot      = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-   double maxLot      = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   if(sl_pips <= 0 || sl_pips < 1.0) {
+      Print("SLが小さすぎます。最小ロットを使用します。sl_pips=", sl_pips);
+      return minLot;
+   }
 
-   double rawLot      = (riskAmount * leverage) / (sl_pips * tickValue);
-   double finalLot    = MathMax(minLot, MathMin(rawLot, maxLot));
+   double rawLot = riskAmount / (sl_pips * tickValue);
+   double finalLot = MathMax(minLot, MathMin(rawLot, maxLot));
 
-   finalLot = NormalizeDouble(finalLot / lotStep, 0) * lotStep;
+   // ロット数をブローカーのロットステップに合わせて丸める
+   finalLot = MathFloor(finalLot / lotStep) * lotStep;
+   finalLot = NormalizeDouble(finalLot, (int)MathLog10(1.0/lotStep));
+
+   // デバッグ情報
+   Print("CalculateLots Debug: balance=", balance, " riskAmount=", riskAmount, " sl_pips=", sl_pips);
+   Print("CalculateLots Debug: tickValue=", tickValue, " rawLot=", rawLot, " finalLot=", finalLot);
+   Print("CalculateLots Debug: lotStep=", lotStep, " minLot=", minLot, " maxLot=", maxLot);
+
    return finalLot;
 }

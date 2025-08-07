@@ -84,8 +84,11 @@ void EnterTrade(int type, double sl_pips, double tp_pips)
    double price = (type == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) :
                                              SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   double sl = (type == ORDER_TYPE_BUY) ? price - sl_pips * point : price + sl_pips * point;
-   double tp = (type == ORDER_TYPE_BUY) ? price + tp_pips * point : price - tp_pips * point;
+
+   // --- 修正: pipsをポイントに変換 ---
+   double pipValue = ( _Digits == 3 || _Digits == 5 ) ? 10 * point : point;
+   double sl = (type == ORDER_TYPE_BUY) ? price - sl_pips * pipValue : price + sl_pips * pipValue;
+   double tp = (type == ORDER_TYPE_BUY) ? price + tp_pips * pipValue : price - tp_pips * pipValue;
    double deviation = 10;  // 許容スリッページ（ポイント）
 
    MqlTradeRequest request;
@@ -117,8 +120,6 @@ void EnterTrade(int type, double sl_pips, double tp_pips)
          Print("注文エラー: ", result.retcode);
    }
 }
-
-
 
 // ロット数算出（レバレッジ計算含む）
 double CalculateLots(double sl_pips)

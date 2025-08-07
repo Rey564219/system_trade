@@ -1,7 +1,7 @@
 input ENUM_TIMEFRAMES TimeFrame = PERIOD_M5;
 input int MaPeriod = 40; // 40に変更
-input int nCounter = 3;
-input double leverage = 3.0;
+input int nCounter = 2;
+input double leverage = 10.0;
 input double RiskPercent = 1.0; // リスクパーセントを追加
 
 int trendDir = 0;
@@ -10,7 +10,7 @@ bool isEntryReady = false;
 double slPips = 0, tpPips = 0;
 datetime lastTradeTime = 0;
 input int atrPeriod      = 14;
-input double rrRatio     = 2.0; // 2:1に変更
+input double rrRatio     = 1.5; // 2:1に変更
 
 int magicNumber = 1954305;
 int maHandle;
@@ -129,21 +129,29 @@ void GetHeikinAshi(int index, double &haOpen, double &haClose, double &haHigh, d
 //-------------------------------------------
 int DetectTrend()
 {
-   if(CopyBuffer(maHandle, 0, 1, 2, maBuffer) != 2)
+   if(CopyBuffer(maHandle, 0, 1, 5, maBuffer) != 5)
    {
       Print("MA取得失敗");
       return 0;
    }
-
+   int adxHandle;
+   double adxBuffer[1];
+   adxHandle = iADX(_Symbol, TimeFrame, 14);
+   if(CopyBuffer(adxHandle, 0, 1, 1, adxBuffer) != 1)
+   {
+      Print("ADX値取得失敗");
+      return 0;
+   }
+   double adx = adxBuffer[0];
    double ma1 = maBuffer[0];
-   double ma2 = maBuffer[1];
+   double ma2 = maBuffer[4];
 
    double haClose, haOpen, haHigh, haLow;
    GetHeikinAshi(1, haOpen, haClose, haHigh, haLow);
 
-   if(ma1 > ma2 && haClose > ma1)
+   if(ma1 > ma2 && adx > 20)
       return 1;
-   else if(ma1 < ma2 && haClose < ma1)
+   else if(ma1 < ma2 && adx > 20)
       return -1;
    else
       return 0;
